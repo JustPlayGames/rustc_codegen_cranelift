@@ -875,6 +875,54 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
             );
         }
 
+        "llvm.x86.avx512.pternlog.d.128"
+        | "llvm.x86.avx512.pternlog.d.256"
+        | "llvm.x86.avx512.pternlog.d.512"
+        | "llvm.x86.avx512.pternlog.q.128"
+        | "llvm.x86.avx512.pternlog.q.256"
+        | "llvm.x86.avx512.pternlog.q.512" => {
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm512_ternarylogic_epi32
+            // Each result bit is bit `(a << 2) | (b << 1) | c` of imm8, for the bits of a, b and c
+            // at that position: the OR of the minterms imm8 selects.
+            intrinsic_args!(fx, args => (a, b, c, _imm8); intrinsic);
+
+            let Some(imm8) = crate::constant::mir_operand_get_const_val(fx, &args[3].node) else {
+                fx.tcx.dcx().span_fatal(
+                    span,
+                    "Index argument for `_mm512_ternarylogic_epi32` is not a constant",
+                )
+            };
+            // An `i32` in LLVM's signature; only its low byte matters.
+            let imm8 = imm8.to_u32() as u8;
+
+            simd_trio_for_each_lane(
+                fx,
+                a,
+                b,
+                c,
+                ret,
+                &|fx, _lane_ty, _res_lane_ty, a_lane, b_lane, c_lane| {
+                    let ty = fx.bcx.func.dfg.value_type(a_lane);
+                    let mut res = fx.bcx.ins().iconst(ty, 0);
+                    for minterm in 0..8u8 {
+                        if imm8 & (1 << minterm) == 0 {
+                            continue;
+                        }
+                        let pick = |fx: &mut FunctionCx<'_, '_, 'tcx>, v: Value, set: bool| {
+                            if set { v } else { fx.bcx.ins().bnot(v) }
+                        };
+                        let a = pick(fx, a_lane, minterm & 4 != 0);
+                        let b = pick(fx, b_lane, minterm & 2 != 0);
+                        let c = pick(fx, c_lane, minterm & 1 != 0);
+                        let ab = fx.bcx.ins().band(a, b);
+                        let abc = fx.bcx.ins().band(ab, c);
+                        res = fx.bcx.ins().bor(res, abc);
+                    }
+                    res
+                },
+            );
+        }
+
         "llvm.x86.pclmulqdq" | "llvm.x86.pclmulqdq.256" | "llvm.x86.pclmulqdq.512" => {
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_clmulepi64_si128&ig_expand=772
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_clmulepi64_epi128&ig_expand=752
