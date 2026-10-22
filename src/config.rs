@@ -32,6 +32,10 @@ impl BackendConfig {
                 // testing cg_clif.
                 continue;
             }
+            if opt.starts_with("clif-inline=") {
+                // Read by `inline::inline_mode`.
+                continue;
+            }
             match &**opt {
                 "jit-mode" => config.jit_mode = true,
                 _ => return Err(format!("Unknown option `{}`", opt)),
