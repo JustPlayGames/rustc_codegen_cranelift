@@ -106,6 +106,7 @@ impl DebugContext {
                     let (dir_path, file_name) =
                         split_path_dir_and_file(path.path(RemapPathScopeComponents::DEBUGINFO));
                     let dir_name = osstr_as_utf8_bytes(dir_path.as_os_str());
+                    let file_name_os = file_name;
                     let file_name = osstr_as_utf8_bytes(file_name);
 
                     let dir_id = if !dir_name.is_empty() {
@@ -122,7 +123,17 @@ impl DebugContext {
 
                     let has_md5 = source_file.src_hash.kind == SourceFileHashAlgorithm::Md5;
                     line_program.file_has_md5 &= has_md5;
-                    line_program.add_file(file_name, dir_id, info)
+                    let file_id = line_program.add_file(file_name, dir_id, info);
+                    if let Some(codeview) = &mut self.codeview {
+                        let dir_name = if dir_name.is_empty() { &[][..] } else { dir_name };
+                        codeview.add_file(
+                            file_id,
+                            dir_name,
+                            osstr_as_utf8_bytes(file_name_os),
+                            source_file,
+                        );
+                    }
+                    file_id
                 }
                 filename => {
                     // For anonymous sources, create an empty directory instead of using the default
@@ -133,7 +144,12 @@ impl DebugContext {
                         line_program.encoding(),
                         line_strings,
                     );
-                    line_program.add_file(dummy_file_name, dir_id, None)
+                    let file_id = line_program.add_file(dummy_file_name, dir_id, None);
+                    if let Some(codeview) = &mut self.codeview {
+                        let name = filename.prefer_remapped_unconditionally().to_string();
+                        codeview.add_file(file_id, &[], name.as_bytes(), source_file);
+                    }
+                    file_id
                 }
             }
         })
