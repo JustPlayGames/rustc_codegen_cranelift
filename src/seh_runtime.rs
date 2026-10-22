@@ -107,7 +107,10 @@ pub(crate) fn define(module: &mut dyn Module) {
     };
 
     for (func_id, body) in [
-        (personality, define_personality as fn(&mut dyn Module, &mut FunctionBuilder<'_>, &Imports, Type)),
+        (
+            personality,
+            define_personality as fn(&mut dyn Module, &mut FunctionBuilder<'_>, &Imports, Type),
+        ),
         (resume, define_resume),
         (free, define_free),
         (copy, define_copy),
@@ -141,7 +144,12 @@ struct Imports {
     copy: FuncId,
 }
 
-fn call(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, f: FuncId, args: &[Value]) -> Option<Value> {
+fn call(
+    module: &mut dyn Module,
+    bcx: &mut FunctionBuilder<'_>,
+    f: FuncId,
+    args: &[Value],
+) -> Option<Value> {
     let func_ref = module.declare_func_in_func(f, bcx.func);
     let inst = bcx.ins().call(func_ref, args);
     bcx.inst_results(inst).first().copied()
@@ -164,7 +172,12 @@ fn store(bcx: &mut FunctionBuilder<'_>, value: Value, addr: Value, offset: i32) 
 }
 
 /// `personality(rec, frame, context, dispatcher_context) -> EXCEPTION_DISPOSITION`
-fn define_personality(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports: &Imports, ptr: Type) {
+fn define_personality(
+    module: &mut dyn Module,
+    bcx: &mut FunctionBuilder<'_>,
+    imports: &Imports,
+    ptr: Type,
+) {
     let entry = bcx.create_block();
     let lookup = bcx.create_block();
     let lookup_body = bcx.create_block();
@@ -232,7 +245,13 @@ fn define_personality(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, im
 
     bcx.switch_to_block(dispatch_cxx);
     let is_catch = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_CATCH);
-    bcx.ins().brif(is_catch, dispatch_catch, &[], enter_pad, &[BlockArg::Value(rec), BlockArg::Value(zero)]);
+    bcx.ins().brif(
+        is_catch,
+        dispatch_catch,
+        &[],
+        enter_pad,
+        &[BlockArg::Value(rec), BlockArg::Value(zero)],
+    );
 
     bcx.switch_to_block(dispatch_catch);
     // null for foreign exceptions: `catch_fn` aborts on them, like LLVM's catch (...) pad.
@@ -284,7 +303,11 @@ fn define_personality(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, im
     let unwind_rec = bcx.append_block_param(enter_pad, ptr);
     let value = bcx.append_block_param(enter_pad, ptr);
     bcx.switch_to_block(enter_pad);
-    let scratch = bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, CONTEXT_SIZE, 4));
+    let scratch = bcx.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        CONTEXT_SIZE,
+        4,
+    ));
     let scratch = bcx.ins().stack_addr(ptr, scratch, 0);
     let history = load(bcx, ptr, dc, DC_HISTORY_TABLE);
     call(module, bcx, imports.rtl_unwind_ex, &[frame, pad, unwind_rec, value, scratch, history]);
@@ -298,7 +321,12 @@ fn define_personality(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, im
 /// `copy(rec) -> object copy or null`: the heap copy of the Rust panic object thrown by `rec`
 /// (a C++ exception whose type is named "rust_panic"), shared by all pads of one unwind through
 /// a stash in the record's unused ExceptionInformation[12..15]; null for other exceptions.
-fn define_copy(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports: &Imports, ptr: Type) {
+fn define_copy(
+    module: &mut dyn Module,
+    bcx: &mut FunctionBuilder<'_>,
+    imports: &Imports,
+    ptr: Type,
+) {
     let entry = bcx.create_block();
     let null = bcx.create_block();
     bcx.append_block_params_for_function_params(entry);
@@ -341,7 +369,8 @@ fn define_copy(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports: 
     let rva = uload32(bcx, catchable_type, 4);
     let type_descriptor = bcx.ins().iadd(base, rva);
     for (i, &byte) in b"rust_panic\0".iter().enumerate() {
-        let b = bcx.ins().uload8(types::I32, MemFlagsData::trusted(), type_descriptor, 16 + i as i32);
+        let b =
+            bcx.ins().uload8(types::I32, MemFlagsData::trusted(), type_descriptor, 16 + i as i32);
         let c = bcx.ins().icmp_imm_u(IntCC::Equal, b, i64::from(byte));
         check(bcx, c);
     }
@@ -424,7 +453,12 @@ impl TypeOf for Value {
 }
 
 /// `resume(obj) -> !`: raise the panic again, from this frame, with the object on its stack.
-fn define_resume(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports: &Imports, ptr: Type) {
+fn define_resume(
+    module: &mut dyn Module,
+    bcx: &mut FunctionBuilder<'_>,
+    imports: &Imports,
+    ptr: Type,
+) {
     let entry = bcx.create_block();
     let non_null = bcx.create_block();
     let null = bcx.create_block();
@@ -438,7 +472,11 @@ fn define_resume(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports
     bcx.switch_to_block(non_null);
     let header = copy_header(bcx, obj);
     let size = load(bcx, ptr, header, 40);
-    let local = bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, MAX_OBJECT as u32, 4));
+    let local = bcx.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        MAX_OBJECT as u32,
+        4,
+    ));
     let local = bcx.ins().stack_addr(ptr, local, 0);
     let target_config = module.target_config();
     bcx.call_memcpy(target_config, local, obj, size);
@@ -462,7 +500,12 @@ fn define_resume(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports
 }
 
 /// `free(obj)`: release a copy after a catch pad (null for foreign exceptions).
-fn define_free(module: &mut dyn Module, bcx: &mut FunctionBuilder<'_>, imports: &Imports, _ptr: Type) {
+fn define_free(
+    module: &mut dyn Module,
+    bcx: &mut FunctionBuilder<'_>,
+    imports: &Imports,
+    _ptr: Type,
+) {
     let entry = bcx.create_block();
     let non_null = bcx.create_block();
     let done = bcx.create_block();

@@ -146,7 +146,14 @@ impl UnwindContext {
         let uses_seh = uses_seh_runtime(module.isa().triple());
         let seh_personality = None;
 
-        UnwindContext { endian, frame_table, cie_id, win_functions: vec![], uses_seh, seh_personality }
+        UnwindContext {
+            endian,
+            frame_table,
+            cie_id,
+            win_functions: vec![],
+            uses_seh,
+            seh_personality,
+        }
     }
 
     /// Whether this object needs the SEH runtime functions (`seh_runtime.rs`): it has landing
@@ -219,8 +226,9 @@ impl UnwindContext {
                                 MachExceptionHandler::Tag(tag, landingpad) => {
                                     let landing_pad = u64::from(landingpad.as_offset());
                                     let action_entry = match tag.as_u32() {
-                                        EXCEPTION_HANDLER_CLEANUP
-                                        | EXCEPTION_HANDLER_TERMINATE => None,
+                                        EXCEPTION_HANDLER_CLEANUP | EXCEPTION_HANDLER_TERMINATE => {
+                                            None
+                                        }
                                         EXCEPTION_HANDLER_CATCH => Some(catch_action),
                                         _ => unreachable!(),
                                     };
@@ -281,9 +289,11 @@ impl UnwindContext {
                 for call_site in compiled_code.buffer.call_sites() {
                     for &handler in call_site.exception_handlers {
                         match handler {
-                            MachExceptionHandler::Tag(tag, landingpad) => {
-                                table.push([call_site.ret_addr, landingpad.as_offset(), tag.as_u32()])
-                            }
+                            MachExceptionHandler::Tag(tag, landingpad) => table.push([
+                                call_site.ret_addr,
+                                landingpad.as_offset(),
+                                tag.as_u32(),
+                            ]),
                             _ => unreachable!(),
                         }
                     }
@@ -427,8 +437,10 @@ fn emit_pdata_xdata(
         size: 32,
     };
 
-    let xdata_section = product.object.add_section(vec![], b".xdata".to_vec(), SectionKind::ReadOnlyData);
-    let pdata_section = product.object.add_section(vec![], b".pdata".to_vec(), SectionKind::ReadOnlyData);
+    let xdata_section =
+        product.object.add_section(vec![], b".xdata".to_vec(), SectionKind::ReadOnlyData);
+    let pdata_section =
+        product.object.add_section(vec![], b".pdata".to_vec(), SectionKind::ReadOnlyData);
     let xdata_symbol = product.object.section_symbol(xdata_section);
     let personality_symbol = seh_personality.map(|id| product.function_symbol(id));
 
