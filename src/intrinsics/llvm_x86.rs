@@ -1086,6 +1086,48 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
             );
         }
 
+        _ if variable_shift_kind(intrinsic).is_some() => {
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_srlv_epi32
+            // Each lane shifts by the count in the same lane of `count`. Unlike Cranelift's
+            // shifts, a count of the lane width or more doesn't wrap: logical shifts give 0 and
+            // arithmetic ones fill the lane with its sign.
+            intrinsic_args!(fx, args => (a, count); intrinsic);
+            let kind = variable_shift_kind(intrinsic).unwrap();
+
+            simd_pair_for_each_lane(
+                fx,
+                a,
+                count,
+                ret,
+                &|fx, _lane_ty, _res_lane_ty, a_lane, count_lane| {
+                    let bits = fx.bcx.func.dfg.value_type(a_lane).bits();
+                    let too_far = fx.bcx.ins().icmp_imm(
+                        IntCC::UnsignedGreaterThanOrEqual,
+                        count_lane,
+                        i64::from(bits),
+                    );
+                    match kind {
+                        VariableShift::Left | VariableShift::LogicalRight => {
+                            let shifted = if kind == VariableShift::Left {
+                                fx.bcx.ins().ishl(a_lane, count_lane)
+                            } else {
+                                fx.bcx.ins().ushr(a_lane, count_lane)
+                            };
+                            let lane_clif_ty = fx.bcx.func.dfg.value_type(a_lane);
+                            let zero = fx.bcx.ins().iconst(lane_clif_ty, 0);
+                            fx.bcx.ins().select(too_far, zero, shifted)
+                        }
+                        VariableShift::ArithmeticRight => {
+                            let count_ty = fx.bcx.func.dfg.value_type(count_lane);
+                            let max = fx.bcx.ins().iconst(count_ty, i64::from(bits - 1));
+                            let count = fx.bcx.ins().select(too_far, max, count_lane);
+                            fx.bcx.ins().sshr(a_lane, count)
+                        }
+                    }
+                },
+            );
+        }
+
         "llvm.x86.aesni.aesenc.256"
         | "llvm.x86.aesni.aesenc.512"
         | "llvm.x86.aesni.aesenclast.256"
@@ -1464,6 +1506,26 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
 // llvm.x86.avx2.vperm2i128
 // llvm.x86.ssse3.pshuf.b.128
 // llvm.x86.avx2.pshuf.b
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VariableShift {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+
+/// `llvm.x86.{avx2,avx512}.ps{ll,rl,ra}v.*`: the per-lane variable shifts.
+fn variable_shift_kind(intrinsic: &str) -> Option<VariableShift> {
+    let rest = intrinsic
+        .strip_prefix("llvm.x86.avx2.")
+        .or_else(|| intrinsic.strip_prefix("llvm.x86.avx512."))?;
+    match rest.split('.').next()? {
+        "psllv" => Some(VariableShift::Left),
+        "psrlv" => Some(VariableShift::LogicalRight),
+        "psrav" => Some(VariableShift::ArithmeticRight),
+        _ => None,
+    }
+}
 
 fn llvm_add_sub<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,

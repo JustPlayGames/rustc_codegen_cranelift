@@ -319,6 +319,12 @@ unsafe fn test_simd() {
             if is_x86_feature_detected!("avx512bw") {
                 test_mm512_shuffle_epi8();
             }
+            if is_x86_feature_detected!("avx2") {
+                test_variable_shifts_avx2();
+            }
+            if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl") {
+                test_variable_shifts_avx512();
+            }
         }
     }
 }
@@ -594,9 +600,8 @@ unsafe fn test_mm256_shuffle_epi8() {
 unsafe fn test_mm512_shuffle_epi8() {
     // Each byte picks a byte of its own 128-bit lane, or zero when its index has bit 7 set.
     let a: [u8; 64] = std::array::from_fn(|i| i as u8 + 1);
-    let b: [u8; 64] = std::array::from_fn(|i| {
-        if i % 7 == 3 { 0x80 } else { ((i * 5 + 3) % 16) as u8 | 0x10 }
-    });
+    let b: [u8; 64] =
+        std::array::from_fn(|i| if i % 7 == 3 { 0x80 } else { ((i * 5 + 3) % 16) as u8 | 0x10 });
     let expected: [u8; 64] = std::array::from_fn(|i| {
         if b[i] & 0x80 != 0 { 0 } else { a[i / 16 * 16 + (b[i] & 0xf) as usize] }
     });
@@ -605,6 +610,71 @@ unsafe fn test_mm512_shuffle_epi8() {
         std::mem::transmute::<_, __m512i>(b),
     ));
     assert_eq!(r, expected);
+}
+
+// Per-lane variable shifts: a count of the lane width or more gives 0 (logical) or the sign
+// (arithmetic), unlike a plain shift, which wraps the count.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[cfg(not(jit))]
+unsafe fn test_variable_shifts_avx2() {
+    let a: [i32; 8] = [-1, 1, i32::MIN, 0x1234_5678, -77, 5, -5, 1 << 30];
+    let c: [i32; 8] = [0, 1, 31, 32, 33, -1, 4, 100];
+    let srl: [i32; 8] =
+        std::array::from_fn(
+            |i| if (c[i] as u32) < 32 { ((a[i] as u32) >> c[i]) as i32 } else { 0 },
+        );
+    let sll: [i32; 8] =
+        std::array::from_fn(
+            |i| if (c[i] as u32) < 32 { ((a[i] as u32) << c[i]) as i32 } else { 0 },
+        );
+    let sra: [i32; 8] = std::array::from_fn(|i| a[i] >> (c[i] as u32).min(31));
+    let (va, vc): (__m256i, __m256i) = (std::mem::transmute(a), std::mem::transmute(c));
+    assert_eq!(std::mem::transmute::<_, [i32; 8]>(_mm256_srlv_epi32(va, vc)), srl);
+    assert_eq!(std::mem::transmute::<_, [i32; 8]>(_mm256_sllv_epi32(va, vc)), sll);
+    assert_eq!(std::mem::transmute::<_, [i32; 8]>(_mm256_srav_epi32(va, vc)), sra);
+    let (lo_a, lo_c): (__m128i, __m128i) = (_mm256_castsi256_si128(va), _mm256_castsi256_si128(vc));
+    assert_eq!(std::mem::transmute::<_, [i32; 4]>(_mm_srlv_epi32(lo_a, lo_c)), srl[..4]);
+
+    let a: [i64; 4] = [-1, 3, i64::MIN, 0x0123_4567_89ab_cdef];
+    let c: [i64; 4] = [63, 64, 1, -2];
+    let srl: [i64; 4] =
+        std::array::from_fn(
+            |i| if (c[i] as u64) < 64 { ((a[i] as u64) >> c[i]) as i64 } else { 0 },
+        );
+    let sll: [i64; 4] =
+        std::array::from_fn(
+            |i| if (c[i] as u64) < 64 { ((a[i] as u64) << c[i]) as i64 } else { 0 },
+        );
+    let (va, vc): (__m256i, __m256i) = (std::mem::transmute(a), std::mem::transmute(c));
+    assert_eq!(std::mem::transmute::<_, [i64; 4]>(_mm256_srlv_epi64(va, vc)), srl);
+    assert_eq!(std::mem::transmute::<_, [i64; 4]>(_mm256_sllv_epi64(va, vc)), sll);
+    let (lo_a, lo_c): (__m128i, __m128i) = (_mm256_castsi256_si128(va), _mm256_castsi256_si128(vc));
+    assert_eq!(std::mem::transmute::<_, [i64; 2]>(_mm_sllv_epi64(lo_a, lo_c)), sll[..2]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw,avx512vl")]
+#[cfg(not(jit))]
+unsafe fn test_variable_shifts_avx512() {
+    let a: [i16; 32] = std::array::from_fn(|i| (i as i16 - 16) * 1021);
+    let c: [i16; 32] = std::array::from_fn(|i| i as i16 - 2);
+    let srl: [i16; 32] =
+        std::array::from_fn(
+            |i| if (c[i] as u16) < 16 { ((a[i] as u16) >> c[i]) as i16 } else { 0 },
+        );
+    let sra: [i16; 32] = std::array::from_fn(|i| a[i] >> (c[i] as u16).min(15));
+    let (va, vc): (__m512i, __m512i) = (std::mem::transmute(a), std::mem::transmute(c));
+    assert_eq!(std::mem::transmute::<_, [i16; 32]>(_mm512_srlv_epi16(va, vc)), srl);
+    assert_eq!(std::mem::transmute::<_, [i16; 32]>(_mm512_srav_epi16(va, vc)), sra);
+
+    let a: [i64; 8] = [-1, 3, i64::MIN, -0x0123_4567_89ab_cdef, 9, -9, 1, -1];
+    let c: [i64; 8] = [63, 64, 1, -2, 0, 2, 70, 65];
+    let sra: [i64; 8] = std::array::from_fn(|i| a[i] >> (c[i] as u64).min(63));
+    let (va, vc): (__m512i, __m512i) = (std::mem::transmute(a), std::mem::transmute(c));
+    assert_eq!(std::mem::transmute::<_, [i64; 8]>(_mm512_srav_epi64(va, vc)), sra);
+    let (lo_a, lo_c): (__m256i, __m256i) = (_mm512_castsi512_si256(va), _mm512_castsi512_si256(vc));
+    assert_eq!(std::mem::transmute::<_, [i64; 4]>(_mm256_srav_epi64(lo_a, lo_c)), sra[..4]);
 }
 
 #[cfg(target_arch = "x86_64")]
