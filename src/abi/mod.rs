@@ -398,13 +398,17 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         }
     }
 
-    let sharing = crate::stack_slot_sharing::analyze(fx, &ssa_analyzed);
+    let forwarding = crate::move_forwarding::analyze(fx, &ssa_analyzed);
+    let sharing = crate::stack_slot_sharing::analyze(fx, &ssa_analyzed, &forwarding);
     let mut shared_slots = vec![None; sharing.groups.len()];
     for local in fx.mir.vars_and_temps_iter() {
         let ty = fx.monomorphize(fx.mir.local_decls[local].ty);
         let layout = fx.layout_of(ty);
 
-        let place = if let Some(group) = sharing.group_of[local] {
+        let place = if forwarding.alias_of[local].is_some() {
+            // Replaced by its source's place below, once every local has one.
+            CPlace::for_ptr(Pointer::dangling(layout.align.abi), layout)
+        } else if let Some(group) = sharing.group_of[local] {
             let (size, align) = sharing.groups[group];
             let ptr = *shared_slots[group].get_or_insert_with(|| {
                 fx.create_stack_slot(u32::try_from(size).unwrap(), u32::try_from(align).unwrap())
@@ -418,6 +422,12 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         };
         assert_eq!(fx.local_map.push(place), local);
     }
+    for (temp, src) in forwarding.alias_of.iter_enumerated() {
+        if let Some(src) = *src {
+            fx.local_map[temp] = fx.local_map[src];
+        }
+    }
+    fx.skipped_stmts = forwarding.skipped.into_iter().map(|(loc, _)| loc).collect();
 
     fx.bcx.ins().jump(*fx.block_map.get(START_BLOCK).unwrap(), &[]);
 }

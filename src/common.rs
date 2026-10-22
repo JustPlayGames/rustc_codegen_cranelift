@@ -288,6 +288,8 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     pub(crate) bcx: FunctionBuilder<'clif>,
     pub(crate) block_map: IndexVec<BasicBlock, Block>,
     pub(crate) local_map: IndexVec<Local, CPlace<'tcx>>,
+    /// Statements not to emit: moves into temporaries that alias their source (`move_forwarding`).
+    pub(crate) skipped_stmts: rustc_data_structures::fx::FxHashSet<rustc_middle::mir::Location>,
 
     /// When `#[track_caller]` is used, the implicit caller location is stored in this variable.
     pub(crate) caller_location: Option<CValue<'tcx>>,

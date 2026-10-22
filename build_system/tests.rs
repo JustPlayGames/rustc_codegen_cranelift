@@ -93,6 +93,11 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         runner.run_rustc(["example/stack_slot_sharing.rs", "-Copt-level=2"]);
         runner.run_out_command("stack_slot_sharing", &[]);
     }),
+    TestCase::custom("aot.move_forwarding", &|runner| {
+        // Only forwarded when optimizing.
+        runner.run_rustc(["example/move_forwarding.rs", "-Copt-level=2"]);
+        runner.run_out_command("move_forwarding", &[]);
+    }),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();

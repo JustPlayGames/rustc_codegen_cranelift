@@ -111,7 +111,8 @@ pub(crate) fn codegen_fn<'tcx>(
         bcx,
         block_map,
         local_map: IndexVec::with_capacity(mir.local_decls.len()),
-        caller_location: None, // set by `codegen_fn_prelude`
+        skipped_stmts: Default::default(), // set by `codegen_fn_prelude`
+        caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot,
 
         clif_comments,
@@ -321,7 +322,12 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
         }
 
         fx.bcx.ins().nop();
-        for stmt in &bb_data.statements {
+        for (statement_index, stmt) in bb_data.statements.iter().enumerate() {
+            if !fx.skipped_stmts.is_empty()
+                && fx.skipped_stmts.contains(&Location { block: bb, statement_index })
+            {
+                continue;
+            }
             fx.set_debug_loc(stmt.source_info);
             codegen_stmt(fx, block, stmt);
         }

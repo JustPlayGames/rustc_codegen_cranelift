@@ -21,6 +21,7 @@ use rustc_middle::mir::visit::{MutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::{BasicBlock, Location, Rvalue, StatementKind, TerminatorKind};
 
 use crate::analyze::SsaKind;
+use crate::move_forwarding::MoveForwarding;
 use crate::prelude::*;
 
 /// Above this many words of interference checks (candidates squared times program points over
@@ -71,6 +72,7 @@ impl BitSet {
 pub(crate) fn analyze<'tcx>(
     fx: &FunctionCx<'_, '_, 'tcx>,
     ssa: &IndexVec<Local, SsaKind>,
+    forwarding: &MoveForwarding,
 ) -> SlotSharing {
     let mir = fx.mir;
     let mut sharing = SlotSharing {
@@ -93,7 +95,8 @@ pub(crate) fn analyze<'tcx>(
     let mut index_of = IndexVec::<Local, Option<usize>>::from_elem_n(None, mir.local_decls.len());
     let mut candidates = vec![];
     for local in mir.vars_and_temps_iter() {
-        if !has_storage_live[local] {
+        // A forwarded temporary has no memory of its own.
+        if !has_storage_live[local] || forwarding.alias_of[local].is_some() {
             continue;
         }
         let ty = fx.monomorphize(mir.local_decls[local].ty);
@@ -191,6 +194,17 @@ pub(crate) fn analyze<'tcx>(
         });
         value_live.reverse();
         collect_mentions(mir, bb, &index_of, &mut mentioned);
+        // A forwarded source's memory is the call's argument: it is in use from its move to the
+        // call, although its value is dead after the move.
+        for &(loc, src) in &forwarding.skipped {
+            if loc.block == bb
+                && let Some(c) = index_of[src]
+            {
+                for m in &mut mentioned[loc.statement_index..] {
+                    m.push(c);
+                }
+            }
+        }
 
         let mut storage = BitSet(entry[bb].0.clone());
         let mut point = block_start[bb];
