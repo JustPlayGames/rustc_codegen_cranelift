@@ -312,7 +312,7 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                 bool_to_zero_or_max_uint(fx, res_lane_ty, res_lane)
             });
         }
-        "llvm.x86.ssse3.pshuf.b.128" | "llvm.x86.avx2.pshuf.b" => {
+        "llvm.x86.ssse3.pshuf.b.128" | "llvm.x86.avx2.pshuf.b" | "llvm.x86.avx512.pshuf.b.512" => {
             let (a, b) = match args {
                 [a, b] => (a, b),
                 _ => bug!("wrong number of args for intrinsic {intrinsic}"),
@@ -321,28 +321,22 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
             let b = codegen_operand(fx, &b.node);
 
             // Based on the pseudocode at https://github.com/rust-lang/stdarch/blob/1cfbca8b38fd9b4282b2f054f61c6ca69fc7ce29/crates/core_arch/src/x86/avx2.rs#L2319-L2332
+            // Each byte picks a byte of its own 128-bit lane.
+            let lanes = match intrinsic {
+                "llvm.x86.ssse3.pshuf.b.128" => 16,
+                "llvm.x86.avx2.pshuf.b" => 32,
+                _ => 64,
+            };
             let zero = fx.bcx.ins().iconst(types::I8, 0);
-            for i in 0..16 {
+            for i in 0..lanes {
                 let b_lane = b.value_lane(fx, i).load_scalar(fx);
                 let is_zero = fx.bcx.ins().band_imm_u(b_lane, 0x80);
                 let a_idx = fx.bcx.ins().band_imm_u(b_lane, 0xf);
+                let a_idx = fx.bcx.ins().iadd_imm_u(a_idx, i64::try_from(i / 16 * 16).unwrap());
                 let a_idx = fx.bcx.ins().uextend(fx.pointer_type, a_idx);
                 let a_lane = a.value_lane_dyn(fx, a_idx).load_scalar(fx);
                 let res = fx.bcx.ins().select(is_zero, zero, a_lane);
                 ret.place_lane(fx, i).to_ptr().store(fx, res, MemFlagsData::trusted());
-            }
-
-            if intrinsic == "llvm.x86.avx2.pshuf.b" {
-                for i in 16..32 {
-                    let b_lane = b.value_lane(fx, i).load_scalar(fx);
-                    let is_zero = fx.bcx.ins().band_imm_u(b_lane, 0x80);
-                    let b_lane_masked = fx.bcx.ins().band_imm_u(b_lane, 0xf);
-                    let a_idx = fx.bcx.ins().iadd_imm_u(b_lane_masked, 16);
-                    let a_idx = fx.bcx.ins().uextend(fx.pointer_type, a_idx);
-                    let a_lane = a.value_lane_dyn(fx, a_idx).load_scalar(fx);
-                    let res = fx.bcx.ins().select(is_zero, zero, a_lane);
-                    ret.place_lane(fx, i).to_ptr().store(fx, res, MemFlagsData::trusted());
-                }
             }
         }
         "llvm.x86.avx2.permd" => {
