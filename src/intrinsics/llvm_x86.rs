@@ -592,6 +592,32 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                 ret.place_lane(fx, out_lane_idx).write_cvalue(fx, res_lane);
             }
         }
+        "llvm.x86.sse2.pmulh.w"
+        | "llvm.x86.avx2.pmulh.w"
+        | "llvm.x86.sse2.pmulhu.w"
+        | "llvm.x86.avx2.pmulhu.w" => {
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_mulhi_epi16
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_mulhi_epu16
+            intrinsic_args!(fx, args => (a, b); intrinsic);
+
+            let (_, lane_ty) = a.layout().ty.simd_size_and_type(fx.tcx);
+            assert!(lane_ty == fx.tcx.types.i16 || lane_ty == fx.tcx.types.u16);
+            let signed = intrinsic.ends_with("pmulh.w");
+
+            simd_pair_for_each_lane(
+                fx,
+                a,
+                b,
+                ret,
+                &|fx, _lane_ty, _res_lane_ty, a_lane, b_lane| {
+                    if signed {
+                        fx.bcx.ins().smulhi(a_lane, b_lane)
+                    } else {
+                        fx.bcx.ins().umulhi(a_lane, b_lane)
+                    }
+                },
+            );
+        }
         "llvm.x86.sse2.pmadd.wd" | "llvm.x86.avx2.pmadd.wd" => {
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_madd_epi16&ig_expand=4231
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm256_madd_epi16&ig_expand=4234

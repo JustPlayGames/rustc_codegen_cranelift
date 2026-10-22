@@ -256,6 +256,10 @@ unsafe fn test_simd() {
         test_mm_movemask_epi8();
         test_mm256_movemask_epi8();
         test_mm_add_epi8();
+        test_mm_mulhi_epi16();
+        test_mm_mulhi_epu16();
+        test_mm256_mulhi_epi16();
+        test_mm256_mulhi_epu16();
         test_mm_add_pd();
         test_mm_cvtepi8_epi16();
         #[cfg(not(jit))]
@@ -358,6 +362,43 @@ unsafe fn test_mm256_movemask_epi8() {
     let r = _mm256_movemask_epi8(a);
     let e = -1;
     assert_eq!(r, e);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn test_mm_mulhi_epi16() {
+    let a = _mm_setr_epi16(1000, -1000, 0x7fff, -0x8000, 3, -3, 0x4000, -1);
+    let b = _mm_setr_epi16(1000, 1000, 0x7fff, -0x8000, -3, -3, 4, -1);
+    let r = _mm_mulhi_epi16(a, b);
+    let e = _mm_setr_epi16(15, -16, 0x3fff, 0x4000, -1, 0, 1, 0);
+    assert_eq_m128i(r, e);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn test_mm_mulhi_epu16() {
+    let a = _mm_setr_epi16(1000, -1, 0x7fff, -0x8000, 3, 0x4000, -2, 0);
+    let b = _mm_setr_epi16(1000, -1, 0x7fff, -0x8000, -3, 4, 2, -1);
+    let r = _mm_mulhi_epu16(a, b);
+    // 0xffff * 0xffff = 0xfffe_0001, 0x8000 * 0x8000 = 0x4000_0000, 3 * 0xfffd = 0x2_fff7, 0xfffe * 2 = 0x1_fffc
+    let e = _mm_setr_epi16(15, -2, 0x3fff, 0x4000, 2, 1, 1, 0);
+    assert_eq_m128i(r, e);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn test_mm256_mulhi_epi16() {
+    let a = _mm256_set1_epi16(-1000);
+    let b = _mm256_set1_epi16(1000);
+    assert_eq_m256i(_mm256_mulhi_epi16(a, b), _mm256_set1_epi16(-16));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn test_mm256_mulhi_epu16() {
+    let a = _mm256_set1_epi16(-1);
+    let b = _mm256_set1_epi16(-1);
+    assert_eq_m256i(_mm256_mulhi_epu16(a, b), _mm256_set1_epi16(-2));
 }
 
 #[cfg(target_arch = "x86_64")]
