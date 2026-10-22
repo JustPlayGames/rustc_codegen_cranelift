@@ -79,7 +79,11 @@ pub(crate) fn analyze<'tcx>(
         group_of: IndexVec::from_elem_n(None, mir.local_decls.len()),
         groups: vec![],
     };
-    if fx.tcx.sess.opts.optimize == rustc_session::config::OptLevel::No {
+    // Without optimizations a debugger may show a local whose memory another one reuses, so
+    // locals keep slots of their own then, unless there is no debuginfo to show them with.
+    if fx.tcx.sess.opts.optimize == rustc_session::config::OptLevel::No
+        && fx.tcx.sess.opts.debuginfo != rustc_session::config::DebugInfo::None
+    {
         return sharing;
     }
 
