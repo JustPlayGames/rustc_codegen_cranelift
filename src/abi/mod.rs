@@ -104,6 +104,10 @@ fn declare_import_function(
     name: &str,
     sig: &Signature,
 ) -> FuncId {
+    // `#[link_name = "\x01foo"]` is LLVM's marker for "use `foo` verbatim, without the target's
+    // global prefix". Strip it like LLVM does, or the import never matches the definition (pulp's
+    // global_asm! symbols).
+    let name = name.strip_prefix('\x01').unwrap_or(name);
     match module.declare_function(name, Linkage::Import, sig) {
         Ok(func_id) => func_id,
         Err(ModuleError::IncompatibleDeclaration(_)) => tcx.dcx().fatal(format!(
