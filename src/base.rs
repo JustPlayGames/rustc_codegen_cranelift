@@ -576,8 +576,13 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
             TerminatorKind::UnwindResume => {
                 if cfg!(feature = "unwinding") {
                     let exception_ptr = fx.bcx.use_var(fx.exception_slot);
+                    let resume = if crate::debuginfo::uses_seh_runtime(fx.module.isa().triple()) {
+                        crate::debuginfo::SEH_RESUME
+                    } else {
+                        "_Unwind_Resume"
+                    };
                     fx.lib_call(
-                        "_Unwind_Resume",
+                        resume,
                         vec![AbiParam::new(fx.pointer_type)],
                         vec![],
                         &[exception_ptr],

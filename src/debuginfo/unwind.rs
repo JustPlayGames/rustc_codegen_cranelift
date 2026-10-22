@@ -17,11 +17,41 @@ use crate::prelude::*;
 
 pub(crate) const EXCEPTION_HANDLER_CLEANUP: u32 = 0;
 pub(crate) const EXCEPTION_HANDLER_CATCH: u32 = 1;
+/// A landing pad that aborts (`UnwindAction::Terminate`). Treated as a cleanup in the
+/// `.gcc_except_table`; on Windows it catches C++ exceptions only, like LLVM's `catch (...)`
+/// terminate funclet, so that `longjmp` and SEH exceptions don't trigger it.
+pub(crate) const EXCEPTION_HANDLER_TERMINATE: u32 = 2;
+
+/// The language-specific handler of every function with landing pads on Windows x64, and the
+/// helpers its landing pads call. See `seh_runtime.rs` for their contract.
+pub(crate) const SEH_PERSONALITY: &str = "__cg_clif_seh_personality";
+pub(crate) const SEH_RESUME: &str = "__cg_clif_seh_resume";
+pub(crate) const SEH_FREE: &str = "__cg_clif_seh_free";
+
+/// Whether landing pads use the SEH runtime functions above (x86_64-pc-windows-msvc) rather
+/// than the Itanium ABI (`_Unwind_Resume`, `.gcc_except_table`).
+pub(crate) fn uses_seh_runtime(triple: &target_lexicon::Triple) -> bool {
+    cfg!(feature = "unwinding")
+        && triple.operating_system == target_lexicon::OperatingSystem::Windows
+        && triple.architecture == target_lexicon::Architecture::X86_64
+        && triple.environment == target_lexicon::Environment::Msvc
+}
+
+/// `.pdata`/`.xdata` for one function (Windows x64).
+struct WinFunction {
+    func_id: FuncId,
+    code_len: u32,
+    /// `UNWIND_INFO`, followed by the handler's RVA (at `handler_reloc`) and its data.
+    xdata: Vec<u8>,
+    handler_reloc: Option<usize>,
+}
 
 pub(crate) struct UnwindContext {
     endian: RunTimeEndian,
     frame_table: FrameTable,
     cie_id: Option<CieId>,
+    win_functions: Vec<WinFunction>,
+    seh_personality: Option<FuncId>,
 }
 
 impl UnwindContext {
@@ -111,7 +141,26 @@ impl UnwindContext {
             None
         };
 
-        UnwindContext { endian, frame_table, cie_id }
+        let seh_personality = if uses_seh_runtime(module.isa().triple()) {
+            let ptr = AbiParam::new(module.target_config().pointer_type());
+            Some(
+                module
+                    .declare_function(
+                        SEH_PERSONALITY,
+                        Linkage::Import,
+                        &Signature {
+                            params: vec![ptr, ptr, ptr, ptr],
+                            returns: vec![AbiParam::new(types::I32)],
+                            call_conv: module.target_config().default_call_conv,
+                        },
+                    )
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+
+        UnwindContext { endian, frame_table, cie_id, win_functions: vec![], seh_personality }
     }
 
     pub(crate) fn add_function(
@@ -175,7 +224,8 @@ impl UnwindContext {
                                 MachExceptionHandler::Tag(tag, landingpad) => {
                                     let landing_pad = u64::from(landingpad.as_offset());
                                     let action_entry = match tag.as_u32() {
-                                        EXCEPTION_HANDLER_CLEANUP => None,
+                                        EXCEPTION_HANDLER_CLEANUP
+                                        | EXCEPTION_HANDLER_TERMINATE => None,
                                         EXCEPTION_HANDLER_CATCH => Some(catch_action),
                                         _ => unreachable!(),
                                     };
@@ -225,14 +275,61 @@ impl UnwindContext {
 
                 self.frame_table.add_fde(self.cie_id.unwrap(), fde);
             }
-            UnwindInfo::WindowsX64(_) | UnwindInfo::WindowsArm64(_) => {
-                // Windows does not have debug info for its unwind info.
+            UnwindInfo::WindowsX64(unwind_info) => {
+                let compiled_code = context.compiled_code().unwrap();
+                let mut xdata = vec![0; unwind_info.emit_size()];
+                unwind_info.emit(&mut xdata);
+
+                // Landing pads: a language-specific handler finds them through a table of
+                // (return offset, landing pad offset, kind), sorted by return offset.
+                let mut table = vec![];
+                for call_site in compiled_code.buffer.call_sites() {
+                    for &handler in call_site.exception_handlers {
+                        match handler {
+                            MachExceptionHandler::Tag(tag, landingpad) => {
+                                table.push([call_site.ret_addr, landingpad.as_offset(), tag.as_u32()])
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+
+                let handler_reloc = if let (Some(_), false) = (self.seh_personality, table.is_empty()) {
+                    table.sort();
+                    // UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER
+                    xdata[0] |= 0x3 << 3;
+                    let handler_reloc = xdata.len();
+                    xdata.extend(0u32.to_le_bytes());
+                    xdata.extend(u32::try_from(table.len()).unwrap().to_le_bytes());
+                    for entry in table {
+                        for field in entry {
+                            xdata.extend(field.to_le_bytes());
+                        }
+                    }
+                    Some(handler_reloc)
+                } else {
+                    None
+                };
+
+                self.win_functions.push(WinFunction {
+                    func_id,
+                    code_len: compiled_code.code_info().total_size,
+                    xdata,
+                    handler_reloc,
+                });
+            }
+            UnwindInfo::WindowsArm64(_) => {
+                // FIXME emit .pdata/.xdata on Windows Arm64 too
             }
             unwind_info => unimplemented!("{:?}", unwind_info),
         }
     }
 
     pub(crate) fn emit(self, product: &mut ObjectProduct) {
+        if !self.win_functions.is_empty() {
+            emit_pdata_xdata(product, &self.win_functions, self.seh_personality);
+        }
+
         let mut eh_frame = EhFrame::from(super::emit::WriterRelocate::new(self.endian));
         self.frame_table.write_eh_frame(&mut eh_frame).unwrap();
 
@@ -299,6 +396,69 @@ impl UnwindContext {
         {
             // On other platforms, `__register_frame` will walk the FDEs until an entry of length 0
             unsafe { __register_frame(eh_frame.as_ptr()) };
+        }
+    }
+}
+
+/// Writes the `.xdata` (`UNWIND_INFO`) and `.pdata` (`RUNTIME_FUNCTION`) sections that let the
+/// Windows unwinder walk and unwind through the functions of this object.
+fn emit_pdata_xdata(
+    product: &mut ObjectProduct,
+    functions: &[WinFunction],
+    seh_personality: Option<FuncId>,
+) {
+    use object::write::Relocation;
+    use object::{RelocationEncoding, RelocationFlags, RelocationKind, SectionKind};
+
+    let image_offset = RelocationFlags::Generic {
+        kind: RelocationKind::ImageOffset,
+        encoding: RelocationEncoding::Generic,
+        size: 32,
+    };
+
+    let xdata_section = product.object.add_section(vec![], b".xdata".to_vec(), SectionKind::ReadOnlyData);
+    let pdata_section = product.object.add_section(vec![], b".pdata".to_vec(), SectionKind::ReadOnlyData);
+    let xdata_symbol = product.object.section_symbol(xdata_section);
+    let personality_symbol = seh_personality.map(|id| product.function_symbol(id));
+
+    // COFF relocations have implicit addends, which `add_relocation` writes into the section
+    // data: set the data first.
+    let mut xdata = Vec::new();
+    let mut pdata = Vec::new();
+    let mut xdata_relocs = Vec::new();
+    let mut pdata_relocs = Vec::new();
+    for function in functions {
+        let xdata_offset = xdata.len();
+        assert_eq!(xdata_offset % 4, 0);
+        xdata.extend_from_slice(&function.xdata);
+        if let Some(handler_reloc) = function.handler_reloc {
+            xdata_relocs.push((xdata_offset + handler_reloc, personality_symbol.unwrap(), 0));
+        }
+
+        let func_symbol = product.function_symbol(function.func_id);
+        let pdata_offset = pdata.len();
+        pdata.extend([0; 12]);
+        pdata_relocs.push((pdata_offset, func_symbol, 0));
+        pdata_relocs.push((pdata_offset + 4, func_symbol, i64::from(function.code_len)));
+        pdata_relocs.push((pdata_offset + 8, xdata_symbol, i64::try_from(xdata_offset).unwrap()));
+    }
+
+    product.object.section_mut(xdata_section).set_data(xdata, 4);
+    product.object.section_mut(pdata_section).set_data(pdata, 4);
+    for (section, relocs) in [(xdata_section, xdata_relocs), (pdata_section, pdata_relocs)] {
+        for (offset, symbol, addend) in relocs {
+            product
+                .object
+                .add_relocation(
+                    section,
+                    Relocation {
+                        offset: u64::try_from(offset).unwrap(),
+                        symbol,
+                        flags: image_offset,
+                        addend,
+                    },
+                )
+                .unwrap();
         }
     }
 }

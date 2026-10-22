@@ -27,7 +27,10 @@ use rustc_target::callconv::FnAbi;
 
 pub(crate) use self::emit::{DebugReloc, DebugRelocName};
 pub(crate) use self::types::TypeDebugContext;
-pub(crate) use self::unwind::{EXCEPTION_HANDLER_CATCH, EXCEPTION_HANDLER_CLEANUP, UnwindContext};
+pub(crate) use self::unwind::{
+    EXCEPTION_HANDLER_CATCH, EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE, SEH_FREE,
+    SEH_RESUME, UnwindContext, uses_seh_runtime,
+};
 use crate::debuginfo::emit::{address_for_data, address_for_func};
 use crate::prelude::*;
 

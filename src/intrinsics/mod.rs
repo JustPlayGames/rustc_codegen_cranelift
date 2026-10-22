@@ -1454,6 +1454,16 @@ fn codegen_regular_intrinsic_call<'tcx>(
                 fx.bcx.set_cold_block(catch_block);
                 let exception = fx.bcx.append_block_param(catch_block, pointer_ty(fx.tcx));
                 fx.bcx.ins().call_indirect(catch_fn_sig, catch_fn, &[data, exception]);
+                if crate::debuginfo::uses_seh_runtime(fx.module.isa().triple()) {
+                    // The SEH personality hands catch blocks a heap copy of the exception
+                    // object (the thrower's stack is gone by now): release it.
+                    fx.lib_call(
+                        crate::debuginfo::SEH_FREE,
+                        vec![AbiParam::new(fx.pointer_type)],
+                        vec![],
+                        &[exception],
+                    );
+                }
                 let layout = fx.layout_of(fx.tcx.types.bool);
                 let ret_val = CValue::by_val(fx.bcx.ins().iconst(types::I8, 1), layout);
                 ret.write_cvalue(fx, ret_val);
