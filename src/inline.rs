@@ -160,6 +160,8 @@ struct Inliner<'a> {
     caller: usize,
     caller_start: u32,
     inlined: u32,
+    /// The caller's stack slots each inlined call brought: (first slot index, count).
+    groups: Vec<(u32, u32)>,
 }
 
 impl Inliner<'_> {
@@ -208,6 +210,10 @@ impl Inline for Inliner<'_> {
             return InlineCommand::KeepCall;
         }
         self.inlined += 1;
+        if !body.sized_stack_slots.is_empty() {
+            self.groups
+                .push((caller.sized_stack_slots.len() as u32, body.sized_stack_slots.len() as u32));
+        }
         // Bottom-up: the callee's own calls were already considered.
         InlineCommand::Inline { callee: Cow::Borrowed(body), visit_callee: false }
     }
@@ -284,12 +290,15 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
                 caller: idx,
                 caller_start,
                 inlined: 0,
+                groups: Vec::new(),
             };
             let res = ctx.inline(&mut inliner);
             let inlined = inliner.inlined;
+            let groups = std::mem::take(&mut inliner.groups);
             if let Err(err) = res {
                 panic!("inlining into {} failed: {err:?}", funcs[idx].symbol_name);
             }
+            share_inlined_slots(&mut ctx.func, &groups);
             funcs[idx].func = std::mem::replace(&mut ctx.func, ir::Function::new());
             if inlined > 0 {
                 candidates[idx].size = inst_count(&funcs[idx].func);
@@ -298,5 +307,60 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
             }
         }
         done[idx] = true;
+    }
+}
+
+/// Lets the stack slots of different inlined calls share memory.
+///
+/// An inlined callee's slots hold its locals, which are dead once the call returns (nothing may
+/// point into a returned-from frame), and the inlined bodies of two calls never run at the
+/// same time: each call's slots are laid out in one area as the callee's own frame had them,
+/// and all calls' areas start at the same address. Without this, every inlined call would add
+/// its whole frame to the caller's, where LLVM-built code gets them coloured.
+fn share_inlined_slots(func: &mut ir::Function, groups: &[(u32, u32)]) {
+    if groups.len() < 2 {
+        return;
+    }
+    // slot -> (offset in the shared area)
+    let mut remap: FxHashMap<ir::StackSlot, u32> = FxHashMap::default();
+    let mut area_size = 0u32;
+    let mut area_align = 0u8;
+    for &(first, count) in groups {
+        let mut offset = 0u32;
+        for i in first..first + count {
+            let slot = ir::StackSlot::from_u32(i);
+            let data = &func.sized_stack_slots[slot];
+            if data.kind != ir::StackSlotKind::ExplicitSlot || data.key.is_some() {
+                continue;
+            }
+            let align = 1u32 << data.align_shift;
+            offset = (offset + align - 1) & !(align - 1);
+            remap.insert(slot, offset);
+            offset += data.size;
+            area_align = area_align.max(data.align_shift);
+        }
+        area_size = area_size.max(offset);
+    }
+    if remap.is_empty() {
+        return;
+    }
+    let area = func.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        area_size,
+        area_align,
+    ));
+    let insts: Vec<ir::Inst> =
+        func.layout.blocks().flat_map(|block| func.layout.block_insts(block)).collect();
+    for inst in insts {
+        if let InstructionData::StackAddr { stack_slot, offset, .. } = &mut func.dfg.insts[inst] {
+            if let Some(&base) = remap.get(stack_slot) {
+                *stack_slot = area;
+                *offset = ir::immediates::Offset32::new(i32::from(*offset) + base as i32);
+            }
+        }
+    }
+    for (&slot, _) in &remap {
+        func.sized_stack_slots[slot].size = 0;
+        func.sized_stack_slots[slot].align_shift = 0;
     }
 }

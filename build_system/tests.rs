@@ -98,6 +98,23 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         runner.run_rustc(["example/move_forwarding.rs", "-Copt-level=2"]);
         runner.run_out_command("move_forwarding", &[]);
     }),
+    TestCase::custom("aot.inline_calls", &|runner| {
+        // #[inline(always)] callees are inlined at every opt level, small ones when optimizing.
+        runner.run_rustc([
+            "example/inline_calls.rs",
+            "-Copt-level=0",
+            "--crate-name",
+            "inline_calls0",
+        ]);
+        runner.run_out_command("inline_calls0", &[]);
+        runner.run_rustc([
+            "example/inline_calls.rs",
+            "-Copt-level=2",
+            "--crate-name",
+            "inline_calls2",
+        ]);
+        runner.run_out_command("inline_calls2", &[]);
+    }),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();
