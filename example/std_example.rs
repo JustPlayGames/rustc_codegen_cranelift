@@ -325,6 +325,9 @@ unsafe fn test_simd() {
             if is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl") {
                 test_variable_shifts_avx512();
             }
+            if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+                test_ternarylogic();
+            }
         }
     }
 }
@@ -675,6 +678,37 @@ unsafe fn test_variable_shifts_avx512() {
     assert_eq!(std::mem::transmute::<_, [i64; 8]>(_mm512_srav_epi64(va, vc)), sra);
     let (lo_a, lo_c): (__m256i, __m256i) = (_mm512_castsi512_si256(va), _mm512_castsi512_si256(vc));
     assert_eq!(std::mem::transmute::<_, [i64; 4]>(_mm256_srav_epi64(lo_a, lo_c)), sra[..4]);
+}
+
+// Bitwise ternary logic: each result bit is bit `(a << 2) | (b << 1) | c` of the immediate.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vl")]
+#[cfg(not(jit))]
+unsafe fn test_ternarylogic() {
+    fn reference(imm: u8, a: u64, b: u64, c: u64) -> u64 {
+        (0..64).fold(0, |r, bit| {
+            let idx = ((a >> bit) & 1) << 2 | ((b >> bit) & 1) << 1 | ((c >> bit) & 1);
+            r | (u64::from(imm >> idx) & 1) << bit
+        })
+    }
+    let a: [u64; 8] = [0xf0f0_f0f0_f0f0_f0f0, 0, !0, 0x0123_4567_89ab_cdef, 5, 6, 7, 8];
+    let b: [u64; 8] = [0xcccc_cccc_cccc_cccc, !0, 0, 0xfedc_ba98_7654_3210, 9, 10, 11, 12];
+    let c: [u64; 8] =
+        [0xaaaa_aaaa_aaaa_aaaa, 0x5555, 0x1234, 0x0f0f_0f0f_0000_ffff, 13, 14, 15, 16];
+    let (va, vb, vc): (__m512i, __m512i, __m512i) =
+        (std::mem::transmute(a), std::mem::transmute(b), std::mem::transmute(c));
+    macro_rules! check {
+        ($($imm:literal)*) => {$(
+            let want: [u64; 8] = std::array::from_fn(|i| reference($imm, a[i], b[i], c[i]));
+            assert_eq!(std::mem::transmute::<_, [u64; 8]>(_mm512_ternarylogic_epi64::<$imm>(va, vb, vc)), want);
+            assert_eq!(std::mem::transmute::<_, [u64; 8]>(_mm512_ternarylogic_epi32::<$imm>(va, vb, vc)), want);
+            let lo = |v: __m512i| _mm512_castsi512_si128(v);
+            assert_eq!(std::mem::transmute::<_, [u64; 2]>(_mm_ternarylogic_epi32::<$imm>(lo(va), lo(vb), lo(vc))), want[..2]);
+            let half = |v: __m512i| _mm512_castsi512_si256(v);
+            assert_eq!(std::mem::transmute::<_, [u64; 4]>(_mm256_ternarylogic_epi64::<$imm>(half(va), half(vb), half(vc))), want[..4]);
+        )*};
+    }
+    check!(0x00 0xff 0x96 0xe8 0xca 0xf0 0xcc 0xaa 0x01 0x80 0x3c);
 }
 
 #[cfg(target_arch = "x86_64")]
