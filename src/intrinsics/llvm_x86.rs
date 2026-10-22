@@ -1092,6 +1092,65 @@ pub(super) fn codegen_x86_llvm_intrinsic_call<'tcx>(
             );
         }
 
+        "llvm.x86.aesni.aesenc.256"
+        | "llvm.x86.aesni.aesenc.512"
+        | "llvm.x86.aesni.aesenclast.256"
+        | "llvm.x86.aesni.aesenclast.512"
+        | "llvm.x86.aesni.aesdec.256"
+        | "llvm.x86.aesni.aesdec.512"
+        | "llvm.x86.aesni.aesdeclast.256"
+        | "llvm.x86.aesni.aesdeclast.512" => {
+            // VAES: https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm512_aesenc_epi128
+            // Each 128-bit lane is an independent AES round, so emit the AES-NI instruction once
+            // per lane. A CPU with VAES always has AES-NI.
+            intrinsic_args!(fx, args => (a, round_key); intrinsic);
+
+            let insn =
+                intrinsic.strip_prefix("llvm.x86.aesni.").unwrap().split('.').next().unwrap();
+            let lanes = a.layout().size.bytes() / 16;
+            assert!(lanes == 2 || lanes == 4, "{intrinsic}: unexpected size {:?}", a.layout().size);
+
+            let (a_ptr, _) = a.force_stack(fx);
+            let (key_ptr, _) = round_key.force_stack(fx);
+            let tmp = CPlace::new_stack_slot(fx, ret.layout());
+            let tmp_ptr = tmp.to_ptr();
+            let lane_layout = fx.layout_of(fx.tcx.types.u128);
+
+            for lane in 0..lanes {
+                let offset = i64::try_from(lane * 16).unwrap();
+                let a_lane =
+                    a_ptr.offset_i64(fx, offset).load(fx, types::I64X2, MemFlagsData::trusted());
+                let key_lane =
+                    key_ptr.offset_i64(fx, offset).load(fx, types::I64X2, MemFlagsData::trusted());
+                let out = CPlace::for_ptr(tmp_ptr.offset_i64(fx, offset), lane_layout);
+
+                codegen_inline_asm_inner(
+                    fx,
+                    &[InlineAsmTemplatePiece::String(format!("{insn} xmm0, xmm1").into())],
+                    &[
+                        CInlineAsmOperand::InOut {
+                            reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(
+                                X86InlineAsmReg::xmm0,
+                            )),
+                            _late: true,
+                            in_value: a_lane,
+                            out_place: Some(out),
+                        },
+                        CInlineAsmOperand::In {
+                            reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(
+                                X86InlineAsmReg::xmm1,
+                            )),
+                            value: key_lane,
+                        },
+                    ],
+                    InlineAsmOptions::NOSTACK | InlineAsmOptions::PURE | InlineAsmOptions::NOMEM,
+                );
+            }
+
+            let res = tmp.to_cvalue(fx);
+            ret.write_cvalue(fx, res);
+        }
+
         "llvm.x86.sha1rnds4" => {
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_sha1rnds4_epu32&ig_expand=5877
             intrinsic_args!(fx, args => (a, b, _func); intrinsic);

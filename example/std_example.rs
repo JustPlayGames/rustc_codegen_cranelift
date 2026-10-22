@@ -310,6 +310,12 @@ unsafe fn test_simd() {
             if is_x86_feature_detected!("vpclmulqdq") && is_x86_feature_detected!("avx512f") {
                 test_mm512_clmulepi64_epi128();
             }
+            if is_x86_feature_detected!("vaes") && is_x86_feature_detected!("avx2") {
+                test_mm256_aesenc_epi128();
+            }
+            if is_x86_feature_detected!("vaes") && is_x86_feature_detected!("avx512f") {
+                test_mm512_aesenc_epi128();
+            }
         }
     }
 }
@@ -653,6 +659,79 @@ unsafe fn test_mm512_clmulepi64_epi128() {
         _mm512_clmulepi64_epi128::<0x11>(a, b),
         _mm512_setr_epi64(20, 0, 48, 0, 36, 0, 128, 0),
     );
+}
+
+// The VAES rounds act on each 128-bit lane as the AES-NI rounds do on one.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "aes")]
+#[cfg(not(jit))]
+unsafe fn aes_rounds_m128(a: __m128i, k: __m128i) -> [__m128i; 4] {
+    [
+        _mm_aesenc_si128(a, k),
+        _mm_aesenclast_si128(a, k),
+        _mm_aesdec_si128(a, k),
+        _mm_aesdeclast_si128(a, k),
+    ]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "vaes,avx2")]
+#[cfg(not(jit))]
+unsafe fn test_mm256_aesenc_epi128() {
+    let a = _mm256_setr_epi64x(
+        0x0123456789abcdef,
+        0x7edcba9876543210,
+        0x1111222233334444,
+        0x5555666677778888,
+    );
+    let k = _mm256_setr_epi64x(
+        0x0f0e0d0c0b0a0908,
+        0x0706050403020100,
+        0x1f1e1d1c1b1a1918,
+        0x1716151413121110,
+    );
+    let got = [
+        _mm256_aesenc_epi128(a, k),
+        _mm256_aesenclast_epi128(a, k),
+        _mm256_aesdec_epi128(a, k),
+        _mm256_aesdeclast_epi128(a, k),
+    ];
+    let lo = aes_rounds_m128(_mm256_castsi256_si128(a), _mm256_castsi256_si128(k));
+    let hi = aes_rounds_m128(_mm256_extracti128_si256::<1>(a), _mm256_extracti128_si256::<1>(k));
+    for i in 0..4 {
+        assert_eq_m256i(got[i], _mm256_set_m128i(hi[i], lo[i]));
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "vaes,avx512f")]
+#[cfg(not(jit))]
+unsafe fn test_mm512_aesenc_epi128() {
+    let a = _mm512_setr_epi64(1, 2, 3, 4, 0x0123456789abcdef, 0x7edcba9876543210, 7, 8);
+    let k = _mm512_setr_epi64(9, 10, 0x0f0e0d0c0b0a0908, 0x0706050403020100, 13, 14, 15, 16);
+    let got = [
+        _mm512_aesenc_epi128(a, k),
+        _mm512_aesenclast_epi128(a, k),
+        _mm512_aesdec_epi128(a, k),
+        _mm512_aesdeclast_epi128(a, k),
+    ];
+    let lanes = [
+        aes_rounds_m128(_mm512_extracti32x4_epi32::<0>(a), _mm512_extracti32x4_epi32::<0>(k)),
+        aes_rounds_m128(_mm512_extracti32x4_epi32::<1>(a), _mm512_extracti32x4_epi32::<1>(k)),
+        aes_rounds_m128(_mm512_extracti32x4_epi32::<2>(a), _mm512_extracti32x4_epi32::<2>(k)),
+        aes_rounds_m128(_mm512_extracti32x4_epi32::<3>(a), _mm512_extracti32x4_epi32::<3>(k)),
+    ];
+    for i in 0..4 {
+        for l in 0..4 {
+            let got_l = match l {
+                0 => _mm512_extracti32x4_epi32::<0>(got[i]),
+                1 => _mm512_extracti32x4_epi32::<1>(got[i]),
+                2 => _mm512_extracti32x4_epi32::<2>(got[i]),
+                _ => _mm512_extracti32x4_epi32::<3>(got[i]),
+            };
+            assert_eq_m128i(got_l, lanes[l][i]);
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
