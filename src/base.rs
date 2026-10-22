@@ -5,11 +5,13 @@ use cranelift_codegen::ir::UserFuncName;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::ModuleError;
 use rustc_ast::InlineAsmOptions;
+use rustc_attr_ir::InlineAttr;
 use rustc_attr_ir::lang_items::LangItem;
 use rustc_codegen_ssa::base::is_call_from_compiler_builtins_to_upstream_monomorphization;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_errors::DiagCtxtHandle;
 use rustc_index::IndexVec;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::TypeVisitableExt;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::{FnAbiOf, HasTypingEnv as _};
@@ -24,12 +26,13 @@ use crate::pretty_clif::{CommentWriter, format_clif_ir_header};
 use crate::{codegen_f16_f128, enable_verifier};
 
 pub(crate) struct CodegenedFunction {
-    symbol_name: String,
-    func_id: FuncId,
-    func: Function,
+    pub(crate) symbol_name: String,
+    pub(crate) func_id: FuncId,
+    pub(crate) func: Function,
     clif_comments: CommentWriter,
     func_debug_cx: Option<FunctionDebugContext>,
     inline_asm: String,
+    pub(crate) inline_hints: crate::inline::InlineHints,
 }
 
 pub(crate) fn codegen_fn<'tcx>(
@@ -145,7 +148,24 @@ pub(crate) fn codegen_fn<'tcx>(
     // Verify function
     verify_func(tcx, &clif_comments, &func);
 
-    CodegenedFunction { symbol_name, func_id, func, clif_comments, func_debug_cx, inline_asm }
+    let attrs = tcx.codegen_instance_attrs(instance.def);
+    let inline_hints = crate::inline::InlineHints {
+        always: matches!(attrs.inline, InlineAttr::Always | InlineAttr::Force { .. }),
+        hint: matches!(attrs.inline, InlineAttr::Hint),
+        never: matches!(attrs.inline, InlineAttr::Never),
+        cold: attrs.flags.contains(CodegenFnAttrFlags::COLD),
+        has_inline_asm: !inline_asm.is_empty(),
+    };
+
+    CodegenedFunction {
+        symbol_name,
+        func_id,
+        func,
+        clif_comments,
+        func_debug_cx,
+        inline_asm,
+        inline_hints,
+    }
 }
 
 pub(crate) fn compile_fn(

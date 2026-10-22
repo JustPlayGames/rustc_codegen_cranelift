@@ -39,6 +39,7 @@ pub(crate) struct AotModule {
     debug_context: Option<DebugContext>,
     codegened_functions: Vec<CodegenedFunction>,
     global_asm: String,
+    inline_mode: crate::inline::InlineMode,
 }
 
 fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
@@ -73,6 +74,7 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
     let debug_context = DebugContext::new(tcx, module.isa(), false, cgu_name);
     let codegened_functions = vec![];
     let global_asm = String::new();
+    let inline_mode = crate::inline::inline_mode(tcx.sess);
 
     AotModule {
         producer,
@@ -81,6 +83,7 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
         debug_context,
         codegened_functions,
         global_asm,
+        inline_mode,
     }
 }
 
@@ -219,6 +222,10 @@ fn compile_cgu(
         cranelift_codegen::timing::set_thread_profiler(Box::new(super::MeasuremeProfiler(
             prof.clone(),
         )));
+
+        prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
+            crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)
+        });
 
         let mut cached_context = Context::new();
         for codegened_func in aot_module.codegened_functions {
