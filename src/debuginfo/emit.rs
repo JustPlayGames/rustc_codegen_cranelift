@@ -23,6 +23,11 @@ pub(super) fn address_for_data(data_id: DataId) -> Address {
 
 impl DebugContext {
     pub(crate) fn emit(&mut self, product: &mut ObjectProduct) {
+        if let Some(codeview) = &self.codeview {
+            codeview.emit(product);
+            return;
+        }
+
         let unit_range_list_id = self.dwarf.unit.ranges.add(self.unit_range_list.clone());
         let root = self.dwarf.unit.root();
         let root = self.dwarf.unit.get_mut(root);

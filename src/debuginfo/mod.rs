@@ -1,5 +1,6 @@
 //! Handling of everything related to debuginfo.
 
+mod codeview;
 mod emit;
 mod gcc_except_table;
 mod line_info;
@@ -49,12 +50,16 @@ pub(crate) struct DebugContext {
     array_size_type: Option<UnitEntryId>,
 
     embed_source: bool,
+
+    /// MSVC targets: CodeView (`.debug$S`) instead of DWARF, which their linkers ignore.
+    codeview: Option<codeview::CodeViewUnit>,
 }
 
 pub(crate) struct FunctionDebugContext {
     entry_id: Option<UnitEntryId>,
     function_source_loc: (FileId, u64, u64),
     source_loc_set: IndexSet<(FileId, u64, u64)>,
+    cv_info: Option<codeview::CvFunctionInfo>,
 }
 
 impl DebugContext {
@@ -64,10 +69,13 @@ impl DebugContext {
         force_disable_debuginfo: bool,
         cgu_name: &str,
     ) -> Option<Self> {
-        if tcx.sess.opts.debuginfo == DebugInfo::None
-            || force_disable_debuginfo
-            || tcx.sess.target.options.is_like_windows
-        {
+        if tcx.sess.opts.debuginfo == DebugInfo::None || force_disable_debuginfo {
+            return None;
+        }
+        // MSVC linkers build the PDB from CodeView and reject DWARF; other Windows targets
+        // (MinGW) get no debuginfo, as before.
+        let use_codeview = tcx.sess.target.options.is_like_msvc;
+        if tcx.sess.target.options.is_like_windows && !use_codeview {
             return None;
         }
 
@@ -144,7 +152,10 @@ impl DebugContext {
 
             let root = dwarf.unit.root();
             let root = dwarf.unit.get_mut(root);
-            root.set(gimli::DW_AT_producer, AttributeValue::StringRef(dwarf.strings.add(producer)));
+            root.set(
+                gimli::DW_AT_producer,
+                AttributeValue::StringRef(dwarf.strings.add(producer.as_str())),
+            );
             root.set(gimli::DW_AT_language, AttributeValue::Language(gimli::DW_LANG_Rust));
             root.set(gimli::DW_AT_name, AttributeValue::StringRef(name));
 
@@ -157,23 +168,39 @@ impl DebugContext {
             root.set(gimli::DW_AT_low_pc, AttributeValue::Address(Address::Constant(0)));
         }
 
-        let array_size_type = if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly {
-            None
+        let codeview = if use_codeview {
+            let unit = codeview::CodeViewUnit::new(
+                isa.triple().architecture,
+                format!("{cgu_name}.o"),
+                producer.clone(),
+                comp_dir.as_bytes(),
+            );
+            if unit.is_none() {
+                return None;
+            }
+            unit
         } else {
-            let array_size_type = dwarf.unit.add(dwarf.unit.root(), gimli::DW_TAG_base_type);
-            let array_size_type_entry = dwarf.unit.get_mut(array_size_type);
-            array_size_type_entry.set(
-                gimli::DW_AT_name,
-                AttributeValue::StringRef(dwarf.strings.add("__ARRAY_SIZE_TYPE__")),
-            );
-            array_size_type_entry
-                .set(gimli::DW_AT_encoding, AttributeValue::Encoding(gimli::DW_ATE_unsigned));
-            array_size_type_entry.set(
-                gimli::DW_AT_byte_size,
-                AttributeValue::Udata(isa.frontend_config().pointer_bytes().into()),
-            );
-            Some(array_size_type)
+            None
         };
+
+        let array_size_type =
+            if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly || codeview.is_some() {
+                None
+            } else {
+                let array_size_type = dwarf.unit.add(dwarf.unit.root(), gimli::DW_TAG_base_type);
+                let array_size_type_entry = dwarf.unit.get_mut(array_size_type);
+                array_size_type_entry.set(
+                    gimli::DW_AT_name,
+                    AttributeValue::StringRef(dwarf.strings.add("__ARRAY_SIZE_TYPE__")),
+                );
+                array_size_type_entry
+                    .set(gimli::DW_AT_encoding, AttributeValue::Encoding(gimli::DW_ATE_unsigned));
+                array_size_type_entry.set(
+                    gimli::DW_AT_byte_size,
+                    AttributeValue::Udata(isa.frontend_config().pointer_bytes().into()),
+                );
+                Some(array_size_type)
+            };
 
         Some(DebugContext {
             endian,
@@ -184,6 +211,7 @@ impl DebugContext {
             namespace_map: DefIdMap::default(),
             array_size_type,
             embed_source,
+            codeview,
         })
     }
 
@@ -224,11 +252,23 @@ impl DebugContext {
     ) -> FunctionDebugContext {
         let (file_id, line, column) = self.get_span_loc(tcx, function_span, function_span);
 
+        if self.codeview.is_some() {
+            return FunctionDebugContext {
+                entry_id: None,
+                function_source_loc: (file_id, line, column),
+                source_loc_set: IndexSet::new(),
+                cv_info: Some(codeview::CvFunctionInfo {
+                    name: codeview_function_name(tcx, instance),
+                }),
+            };
+        }
+
         if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly {
             return FunctionDebugContext {
                 entry_id: None,
                 function_source_loc: (file_id, line, column),
                 source_loc_set: IndexSet::new(),
+                cv_info: None,
             };
         }
 
@@ -295,6 +335,7 @@ impl DebugContext {
             entry_id: Some(entry_id),
             function_source_loc: (file_id, line, column),
             source_loc_set: IndexSet::new(),
+            cv_info: None,
         }
     }
 
@@ -306,7 +347,7 @@ impl DebugContext {
         def_id: DefId,
         data_id: DataId,
     ) {
-        if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly {
+        if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly || self.codeview.is_some() {
             return;
         }
 
@@ -361,6 +402,25 @@ impl DebugContext {
     }
 }
 
+/// The procedure name of a function in CodeView: its path and generic arguments, as LLVM
+/// writes them for MSVC targets (`crate::module::function<T>`, closures as `closure$0`).
+fn codeview_function_name<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> String {
+    let mut name = String::new();
+    type_names::push_item_name(tcx, instance.def_id(), true, &mut name);
+    let enclosing_fn_def_id = tcx.typeck_root_def_id(instance.def_id());
+    let generics = tcx.generics_of(enclosing_fn_def_id);
+    let args = instance.args.truncate_to(tcx, generics);
+    type_names::push_generic_args(
+        tcx,
+        tcx.normalize_erasing_regions(
+            ty::TypingEnv::fully_monomorphized(),
+            Unnormalized::new_wip(args),
+        ),
+        &mut name,
+    );
+    name
+}
+
 impl FunctionDebugContext {
     pub(crate) fn finalize(
         mut self,
@@ -368,6 +428,17 @@ impl FunctionDebugContext {
         func_id: FuncId,
         context: &Context,
     ) {
+        if let Some(codeview) = &mut debug_context.codeview {
+            codeview.add_function(
+                func_id,
+                self.cv_info.take().unwrap(),
+                context,
+                &self.source_loc_set,
+                self.function_source_loc,
+            );
+            return;
+        }
+
         let end = self.create_debug_lines(debug_context, func_id, context);
 
         debug_context
