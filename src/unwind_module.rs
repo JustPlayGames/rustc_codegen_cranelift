@@ -24,7 +24,10 @@ impl<T: Module> UnwindModule<T> {
 }
 
 impl UnwindModule<ObjectModule> {
-    pub(crate) fn finish(self) -> ObjectProduct {
+    pub(crate) fn finish(mut self) -> ObjectProduct {
+        if self.unwind_context.needs_seh_runtime(&self.module) {
+            crate::seh_runtime::define(&mut self);
+        }
         let mut product = self.module.finish();
         self.unwind_context.emit(&mut product);
         product

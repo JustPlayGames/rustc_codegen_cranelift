@@ -23,7 +23,7 @@ pub(crate) const EXCEPTION_HANDLER_CATCH: u32 = 1;
 pub(crate) const EXCEPTION_HANDLER_TERMINATE: u32 = 2;
 
 /// The language-specific handler of every function with landing pads on Windows x64, and the
-/// helpers its landing pads call. See `seh_runtime.rs` for their contract.
+/// helpers its landing pads call, defined by `seh_runtime.rs`.
 pub(crate) const SEH_PERSONALITY: &str = "__cg_clif_seh_personality";
 pub(crate) const SEH_RESUME: &str = "__cg_clif_seh_resume";
 pub(crate) const SEH_FREE: &str = "__cg_clif_seh_free";
@@ -51,6 +51,7 @@ pub(crate) struct UnwindContext {
     frame_table: FrameTable,
     cie_id: Option<CieId>,
     win_functions: Vec<WinFunction>,
+    uses_seh: bool,
     seh_personality: Option<FuncId>,
 }
 
@@ -141,26 +142,20 @@ impl UnwindContext {
             None
         };
 
-        let seh_personality = if uses_seh_runtime(module.isa().triple()) {
-            let ptr = AbiParam::new(module.target_config().pointer_type());
-            Some(
-                module
-                    .declare_function(
-                        SEH_PERSONALITY,
-                        Linkage::Import,
-                        &Signature {
-                            params: vec![ptr, ptr, ptr, ptr],
-                            returns: vec![AbiParam::new(types::I32)],
-                            call_conv: module.target_config().default_call_conv,
-                        },
-                    )
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
+        // Declared on first use: an unused import would still be an undefined symbol of the object.
+        let uses_seh = uses_seh_runtime(module.isa().triple());
+        let seh_personality = None;
 
-        UnwindContext { endian, frame_table, cie_id, win_functions: vec![], seh_personality }
+        UnwindContext { endian, frame_table, cie_id, win_functions: vec![], uses_seh, seh_personality }
+    }
+
+    /// Whether this object needs the SEH runtime functions (`seh_runtime.rs`): it has landing
+    /// pads, or calls the resume or free helper.
+    pub(crate) fn needs_seh_runtime(&self, module: &dyn Module) -> bool {
+        self.uses_seh
+            && (self.seh_personality.is_some()
+                || module.get_name(SEH_RESUME).is_some()
+                || module.get_name(SEH_FREE).is_some())
     }
 
     pub(crate) fn add_function(
@@ -294,7 +289,23 @@ impl UnwindContext {
                     }
                 }
 
-                let handler_reloc = if let (Some(_), false) = (self.seh_personality, table.is_empty()) {
+                let handler_reloc = if self.uses_seh && !table.is_empty() {
+                    if self.seh_personality.is_none() {
+                        let ptr = AbiParam::new(module.target_config().pointer_type());
+                        self.seh_personality = Some(
+                            module
+                                .declare_function(
+                                    SEH_PERSONALITY,
+                                    Linkage::Import,
+                                    &Signature {
+                                        params: vec![ptr, ptr, ptr, ptr],
+                                        returns: vec![AbiParam::new(types::I32)],
+                                        call_conv: module.target_config().default_call_conv,
+                                    },
+                                )
+                                .unwrap(),
+                        );
+                    }
                     table.sort();
                     // UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER
                     xdata[0] |= 0x3 << 3;

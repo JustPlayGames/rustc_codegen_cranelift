@@ -74,6 +74,7 @@ mod num;
 mod optimize;
 mod pointer;
 mod pretty_clif;
+mod seh_runtime;
 mod toolchain;
 mod unsize;
 mod unwind_module;
