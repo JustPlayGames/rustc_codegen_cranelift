@@ -75,6 +75,7 @@ mod optimize;
 mod pointer;
 mod pretty_clif;
 mod seh_runtime;
+mod stack_slot_sharing;
 mod toolchain;
 mod unsize;
 mod unwind_module;

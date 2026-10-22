@@ -398,13 +398,24 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         }
     }
 
+    let sharing = crate::stack_slot_sharing::analyze(fx, &ssa_analyzed);
+    let mut shared_slots = vec![None; sharing.groups.len()];
     for local in fx.mir.vars_and_temps_iter() {
         let ty = fx.monomorphize(fx.mir.local_decls[local].ty);
         let layout = fx.layout_of(ty);
 
-        let is_ssa = ssa_analyzed[local].is_ssa(fx, ty);
-
-        let place = make_local_place(fx, local, layout, is_ssa);
+        let place = if let Some(group) = sharing.group_of[local] {
+            let (size, align) = sharing.groups[group];
+            let ptr = *shared_slots[group].get_or_insert_with(|| {
+                fx.create_stack_slot(u32::try_from(size).unwrap(), u32::try_from(align).unwrap())
+            });
+            let place = CPlace::for_ptr(ptr, layout);
+            self::comments::add_local_place_comments(fx, place, local);
+            place
+        } else {
+            let is_ssa = ssa_analyzed[local].is_ssa(fx, ty);
+            make_local_place(fx, local, layout, is_ssa)
+        };
         assert_eq!(fx.local_map.push(place), local);
     }
 
