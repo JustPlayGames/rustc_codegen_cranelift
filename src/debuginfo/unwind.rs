@@ -50,6 +50,9 @@ pub(crate) struct UnwindContext {
     endian: RunTimeEndian,
     frame_table: FrameTable,
     cie_id: Option<CieId>,
+    /// A CIE without personality and LSDA, for functions without landing pads: like LLVM, only
+    /// functions that catch or clean up need the personality routine and a `.gcc_except_table`.
+    plain_cie_id: Option<CieId>,
     win_functions: Vec<WinFunction>,
     uses_seh: bool,
     seh_personality: Option<FuncId>,
@@ -63,6 +66,7 @@ impl UnwindContext {
         };
         let mut frame_table = FrameTable::default();
 
+        let mut plain_cie_id = None;
         let cie_id = if let Some(mut cie) = module.isa().create_systemv_cie() {
             let ptr_encoding = if pic_eh_frame {
                 gimli::DwEhPe(gimli::DW_EH_PE_pcrel.0 | gimli::DW_EH_PE_sdata4.0)
@@ -71,6 +75,7 @@ impl UnwindContext {
             };
 
             cie.fde_address_encoding = ptr_encoding;
+            plain_cie_id = Some(frame_table.add_cie(cie.clone()));
 
             // FIXME only add personality function and lsda when necessary: https://github.com/rust-lang/rust/blob/1f76d219c906f0112bb1872f33aa977164c53fa6/compiler/rustc_codegen_ssa/src/mir/mod.rs#L200-L204
             if cfg!(feature = "unwinding") {
@@ -150,6 +155,7 @@ impl UnwindContext {
             endian,
             frame_table,
             cie_id,
+            plain_cie_id,
             win_functions: vec![],
             uses_seh,
             seh_personality,
@@ -190,8 +196,18 @@ impl UnwindContext {
             UnwindInfo::SystemV(unwind_info) => {
                 let mut fde = unwind_info.to_fde(address_for_func(func_id));
 
-                // FIXME only add personality function and lsda when necessary: https://github.com/rust-lang/rust/blob/1f76d219c906f0112bb1872f33aa977164c53fa6/compiler/rustc_codegen_ssa/src/mir/mod.rs#L200-L204
-                if cfg!(feature = "unwinding") {
+                // Like LLVM, only functions with landing pads get the personality function and an
+                // LSDA: an unwind through a function without any just continues to its caller, as
+                // the personality would do for call sites without a landing pad. Every
+                // `UnwindAction::Terminate` becomes a landing pad, so nounwind functions keep
+                // their LSDA and abort.
+                let has_landing_pads = context
+                    .compiled_code()
+                    .unwrap()
+                    .buffer
+                    .call_sites()
+                    .any(|call_site| !call_site.exception_handlers.is_empty());
+                if cfg!(feature = "unwinding") && has_landing_pads {
                     // FIXME use unique symbol name derived from function name
                     let lsda = module.declare_anonymous_data(false, false).unwrap();
 
@@ -276,7 +292,12 @@ impl UnwindContext {
                     fde.lsda = Some(address_for_data(lsda));
                 }
 
-                self.frame_table.add_fde(self.cie_id.unwrap(), fde);
+                let cie_id = if cfg!(feature = "unwinding") && !has_landing_pads {
+                    self.plain_cie_id
+                } else {
+                    self.cie_id
+                };
+                self.frame_table.add_fde(cie_id.unwrap(), fde);
             }
             UnwindInfo::WindowsX64(unwind_info) => {
                 let compiled_code = context.compiled_code().unwrap();
