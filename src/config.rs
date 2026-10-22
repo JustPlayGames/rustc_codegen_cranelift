@@ -10,6 +10,12 @@ pub struct BackendConfig {
     ///
     /// Defaults to the value of `CG_CLIF_JIT_ARGS`.
     pub jit_args: Vec<String>,
+
+    /// Register allocator algorithm to use instead of Cranelift's default (`backtracking`).
+    ///
+    /// Defaults to `None`. Can be set using `-Cllvm-args=regalloc=single_pass`, which compiles
+    /// faster at the cost of more spills and moves in the generated code.
+    pub regalloc_algorithm: Option<String>,
 }
 
 impl BackendConfig {
@@ -24,6 +30,7 @@ impl BackendConfig {
                     panic!("CG_CLIF_JIT_ARGS not unicode: {:?}", s);
                 }
             },
+            regalloc_algorithm: None,
         };
 
         for opt in opts {
@@ -34,6 +41,15 @@ impl BackendConfig {
             }
             if opt.starts_with("clif-inline=") {
                 // Read by `inline::inline_mode`.
+                continue;
+            }
+            if let Some(algorithm) = opt.strip_prefix("regalloc=") {
+                match algorithm {
+                    "backtracking" | "single_pass" => {
+                        config.regalloc_algorithm = Some(algorithm.to_owned());
+                    }
+                    _ => return Err(format!("Unknown register allocator `{}`", algorithm)),
+                }
                 continue;
             }
             match &**opt {

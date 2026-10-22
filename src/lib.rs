@@ -321,6 +321,13 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
         }
     }
 
+    if let Some(algorithm) = BackendConfig::from_opts(&sess.opts.cg.llvm_args)
+        .ok()
+        .and_then(|config| config.regalloc_algorithm)
+    {
+        flags_builder.set("regalloc_algorithm", &algorithm).unwrap();
+    }
+
     if let target_lexicon::OperatingSystem::Windows = target_tuple.operating_system {
         // FIXME remove dependency on this from the Rust ABI. cc bytecodealliance/wasmtime#9510
         flags_builder.enable("enable_multi_ret_implicit_sret").unwrap();
