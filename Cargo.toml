@@ -25,12 +25,12 @@ smallvec = "1.8.1"
 # Uncomment to use an unreleased version of cranelift
 [patch.crates-io]
 # The fork's branch cranelift-winx64-seh (Windows x64 try_call and stack probe fixes)
-cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
-cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
-cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
-cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
-cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
-cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "a8641bfc3ee199f8e873f7f44ea8112c7ed5bb40" }
+cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
+cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
+cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
+cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
+cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
+cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "b0cf6942cdf65dbcaa838c5593fce6044e0b8cf0" }
 #cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
