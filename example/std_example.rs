@@ -316,6 +316,9 @@ unsafe fn test_simd() {
             if is_x86_feature_detected!("vaes") && is_x86_feature_detected!("avx512f") {
                 test_mm512_aesenc_epi128();
             }
+            if is_x86_feature_detected!("avx512bw") {
+                test_mm512_shuffle_epi8();
+            }
         }
     }
 }
@@ -583,6 +586,25 @@ unsafe fn test_mm256_shuffle_epi8() {
     );
     let r = _mm256_shuffle_epi8(a, b);
     assert_eq_m256i(r, expected);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+#[cfg(not(jit))]
+unsafe fn test_mm512_shuffle_epi8() {
+    // Each byte picks a byte of its own 128-bit lane, or zero when its index has bit 7 set.
+    let a: [u8; 64] = std::array::from_fn(|i| i as u8 + 1);
+    let b: [u8; 64] = std::array::from_fn(|i| {
+        if i % 7 == 3 { 0x80 } else { ((i * 5 + 3) % 16) as u8 | 0x10 }
+    });
+    let expected: [u8; 64] = std::array::from_fn(|i| {
+        if b[i] & 0x80 != 0 { 0 } else { a[i / 16 * 16 + (b[i] & 0xf) as usize] }
+    });
+    let r: [u8; 64] = std::mem::transmute(_mm512_shuffle_epi8(
+        std::mem::transmute::<_, __m512i>(a),
+        std::mem::transmute::<_, __m512i>(b),
+    ));
+    assert_eq!(r, expected);
 }
 
 #[cfg(target_arch = "x86_64")]
