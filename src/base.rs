@@ -62,9 +62,16 @@ pub(crate) fn codegen_fn<'tcx>(
         String::from_utf8_lossy(&buf).into_owned()
     });
 
-    // Declare function
-    let sig = get_function_sig(tcx, module.target_config().default_call_conv, instance);
-    let func_id = module.declare_function(&symbol_name, Linkage::Local, &sig).unwrap();
+    // Declare function. `predefine_mono_items` declared it already, with its signature.
+    let (func_id, sig) = match module.get_name(&symbol_name) {
+        Some(cranelift_module::FuncOrDataId::Func(func_id)) => {
+            (func_id, module.declarations().get_function_decl(func_id).signature.clone())
+        }
+        _ => {
+            let sig = get_function_sig(tcx, module.target_config().default_call_conv, instance);
+            (module.declare_function(&symbol_name, Linkage::Local, &sig).unwrap(), sig)
+        }
+    };
 
     // Make the FunctionBuilder. Its context comes cleared from the previous function (`finalize`
     // clears it), with the capacity it grew to.
