@@ -345,9 +345,18 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
         .run(|| crate::abi::codegen_fn_prelude(fx, start_block));
 
     let reachable_blocks = traversal::mono_reachable_as_bitset(fx.mir, fx.tcx, fx.instance);
+    let predecessors = fx.mir.basic_blocks.predecessors();
 
     for (bb, bb_data) in fx.mir.basic_blocks.iter_enumerated() {
         let block = fx.get_block(bb);
+        // Every edge into a block comes from the terminator of one of its MIR predecessors
+        // (directly, or through a landing pad or call return block made there). Once those are
+        // all written, the block can be sealed, so that reading a variable in it finds the
+        // definition through its predecessors right away instead of adding a block parameter
+        // that sealing everything at the end removes again.
+        if predecessors[bb].iter().all(|&pred| pred < bb) {
+            fx.bcx.seal_block(block);
+        }
         fx.bcx.switch_to_block(block);
 
         if !reachable_blocks.contains(bb) {
