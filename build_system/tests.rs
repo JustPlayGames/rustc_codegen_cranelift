@@ -148,6 +148,16 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             ]);
             runner.run_out_command(&name, &[]);
         }
+        // Sizes computed with shifts as wide as their type, which only code without overflow
+        // checks reaches.
+        runner.run_rustc([
+            "example/small_mem_copies.rs",
+            "-Copt-level=0",
+            "-Coverflow-checks=off",
+            "--crate-name",
+            "small_mem_copies_wrap",
+        ]);
+        runner.run_out_command("small_mem_copies_wrap", &[]);
     }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.

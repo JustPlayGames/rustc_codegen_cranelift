@@ -4,6 +4,8 @@
 // every size around the vector and scalar chunk boundaries, unaligned and overlapping in both
 // directions, against byte-by-byte results.
 
+#![feature(cfg_overflow_checks)]
+
 use std::hint::black_box;
 use std::ptr;
 
@@ -98,7 +100,27 @@ struct Mixed {
     e: f64,
 }
 
+// Without overflow checks, `<<` takes the shift amount modulo the width, as Cranelift's `ishl`
+// does: the size of this copy is `1u32 << (36 % 32)` = 16 bytes.
+#[cfg(not(overflow_checks))]
+#[inline(always)]
+fn wide_shift(x: u32, s: u32) -> usize {
+    (x << s) as usize
+}
+
+#[cfg(not(overflow_checks))]
+fn copy_with_wide_shift() {
+    let src = black_box([7u8; 32]);
+    let mut dst = [0u8; 32];
+    let n = wide_shift(1, 36);
+    unsafe { ptr::copy_nonoverlapping(black_box(src.as_ptr()), black_box(dst.as_mut_ptr()), n) };
+    assert_eq!(dst.iter().filter(|&&b| b == 7).count(), 16);
+}
+
 fn main() {
+    #[cfg(not(overflow_checks))]
+    copy_with_wide_shift();
+
     sizes!(1 2 3 4 5 6 7 8 9 12 15 16 17 23 24 31 32 33 40 47 48 63 64 65 72 96 100 112 120 127 128 129 130 144);
 
     // Element counts other than one: the size is a multiplication of constants.
