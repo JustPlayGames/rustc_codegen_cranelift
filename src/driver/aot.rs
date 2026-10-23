@@ -59,9 +59,14 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
     // been on MinGW.
     let default_function_sections =
         tcx.sess.target.function_sections && !tcx.sess.target.is_like_windows;
-    builder.per_function_section(
-        tcx.sess.opts.unstable_opts.function_sections.unwrap_or(default_function_sections),
-    );
+    let function_sections =
+        tcx.sess.opts.unstable_opts.function_sections.unwrap_or(default_function_sections);
+    builder.per_function_section(function_sections);
+    // Data in sections of their own too, as LLVM's `-fdata-sections` that rustc asks for with
+    // function sections: with one data section per codegen unit, a single reference keeps all
+    // of its data alive and with it every function its vtables point to, so `--gc-sections`
+    // could keep most of the program.
+    builder.per_data_object_section(function_sections);
 
     let module = UnwindModule::new(
         ObjectModule::new(builder),
