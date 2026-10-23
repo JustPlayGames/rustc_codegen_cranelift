@@ -163,6 +163,7 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
 
     let mut module = make_module(tcx, cgu_name.as_str());
     let mut type_dbg = TypeDebugContext::default();
+    let mut constants_cx = crate::constant::ConstantCx::new();
     super::predefine_mono_items(tcx, &mut module.module, &mono_items);
     for (mono_item, item_data) in mono_items {
         match mono_item {
@@ -191,12 +192,18 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
                     &mut type_dbg,
                     Function::new(),
                     &mut module.module,
+                    &mut constants_cx,
                     instance,
                 );
                 module.codegened_functions.push(codegened_function);
             }
             MonoItem::Static(def_id) => {
-                let data_id = crate::constant::codegen_static(tcx, &mut module.module, def_id);
+                let data_id = crate::constant::codegen_static(
+                    tcx,
+                    &mut module.module,
+                    &mut constants_cx,
+                    def_id,
+                );
                 if let Some(debug_context) = module.debug_context.as_mut() {
                     debug_context.define_static(tcx, &mut type_dbg, def_id, data_id);
                 }
