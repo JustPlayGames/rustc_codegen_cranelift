@@ -159,6 +159,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         ]);
         runner.run_out_command("small_mem_copies_wrap", &[]);
     }),
+    TestCase::custom("aot.probe_unwind", &|runner| {
+        // Unwinding from inside stack probes (a stack overflow, a profiler's signal).
+        for opt in ["0", "2"] {
+            let name = format!("probe_unwind{opt}");
+            runner.run_rustc([
+                "example/probe_unwind.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
