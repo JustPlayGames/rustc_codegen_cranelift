@@ -129,6 +129,14 @@ pub(crate) fn codegen_const_value<'tcx>(
                         _ => unreachable!(),
                     };
 
+                    // A newtype or an enum (`NonZero`, `Ordering`, `Option<NonZero>`) is its
+                    // scalar.
+                    if let BackendRepr::Scalar(scalar) = layout.backend_repr
+                        && scalar_to_clif_type(fx.tcx, scalar) == fx.bcx.func.dfg.value_type(val)
+                    {
+                        return CValue::by_val(val, layout);
+                    }
+
                     // FIXME avoid this extra copy to the stack and directly write to the final
                     // destination
                     let place = CPlace::new_stack_slot(fx, layout);
