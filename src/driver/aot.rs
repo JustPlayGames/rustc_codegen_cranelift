@@ -157,6 +157,7 @@ fn emit_module(
 
 fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
     let _timer = tcx.prof.generic_activity_with_arg("codegen cgu", cgu_name.as_str());
+    let _ip = crate::insn_prof::scope("cg: codegen cgu (rest)");
 
     let cgu = tcx.codegen_unit(cgu_name);
     let mono_items = cgu.items_in_deterministic_order(tcx);
@@ -236,11 +237,13 @@ fn compile_cgu(
         )));
 
         prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
+            let _ip = crate::insn_prof::scope("be: CLIF inliner");
             crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)
         });
 
         if crate::mem_libcalls::enabled(aot_module.module.isa()) {
             prof.generic_activity_with_arg("inline small memcpys", &*cgu_name).run(|| {
+                let _ip = crate::insn_prof::scope("be: small memcpys");
                 for codegened_func in &mut aot_module.codegened_functions {
                     crate::mem_libcalls::inline_small_mem_libcalls(&mut codegened_func.func);
                 }
@@ -280,6 +283,7 @@ fn compile_cgu(
         })?;
 
     prof.generic_activity_with_arg("write object file", &*cgu_name).run(|| {
+        let _ip = crate::insn_prof::scope("be: write object file");
         emit_module(
             output_filenames,
             prof,

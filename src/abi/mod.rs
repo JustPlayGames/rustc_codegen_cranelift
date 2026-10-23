@@ -420,8 +420,14 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         }
     }
 
-    let forwarding = crate::move_forwarding::analyze(fx, &ssa_analyzed);
-    let sharing = crate::stack_slot_sharing::analyze(fx, &ssa_analyzed, &forwarding);
+    let forwarding = {
+        let _ip = crate::insn_prof::scope("cg: move forwarding analysis");
+        crate::move_forwarding::analyze(fx, &ssa_analyzed)
+    };
+    let sharing = {
+        let _ip = crate::insn_prof::scope("cg: slot sharing analysis");
+        crate::stack_slot_sharing::analyze(fx, &ssa_analyzed, &forwarding)
+    };
     let mut shared_slots = vec![None; sharing.groups.len()];
     for local in fx.mir.vars_and_temps_iter() {
         let ty = fx.monomorphize(fx.mir.local_decls[local].ty);

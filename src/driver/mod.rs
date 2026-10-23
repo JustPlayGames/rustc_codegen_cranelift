@@ -77,6 +77,6 @@ impl cranelift_codegen::timing::Profiler for MeasuremeProfiler {
             unsafe { &*(&*timing_guard.profiler as &SelfProfilerRef as *const SelfProfilerRef) }
                 .generic_activity(pass.description()),
         );
-        timing_guard
+        Box::new((timing_guard, crate::insn_prof::scope(pass.description())))
     }
 }

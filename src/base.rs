@@ -33,6 +33,7 @@ pub(crate) struct CodegenedFunction {
     func_debug_cx: Option<FunctionDebugContext>,
     inline_asm: String,
     pub(crate) inline_hints: crate::inline::InlineHints,
+    pub(crate) prof_class: u8,
 }
 
 pub(crate) fn codegen_fn<'tcx>(
@@ -49,6 +50,7 @@ pub(crate) fn codegen_fn<'tcx>(
 
     let symbol_name = tcx.symbol_name(instance).name.to_string();
     let _timer = tcx.prof.generic_activity_with_arg("codegen fn", &*symbol_name);
+    let _ip = crate::insn_prof::scope("cg: codegen fn (rest)");
 
     let mir = tcx.instance_mir(instance.def);
     let _mir_guard = crate::PrintOnPanic(|| {
@@ -126,12 +128,18 @@ pub(crate) fn codegen_fn<'tcx>(
         inline_asm_index: 0,
     };
 
-    tcx.prof.generic_activity("codegen clif ir").run(|| codegen_fn_body(&mut fx, start_block));
+    tcx.prof.generic_activity("codegen clif ir").run(|| {
+        let _ip = crate::insn_prof::scope("cg: clif ir body");
+        codegen_fn_body(&mut fx, start_block)
+    });
     if fx.func_debug_cx.is_some() {
         crate::debuginfo::define_variables(&mut fx, type_dbg);
     }
-    fx.bcx.seal_all_blocks();
-    fx.bcx.finalize(fx.module.target_config());
+    {
+        let _ip = crate::insn_prof::scope("cg: seal + finalize (frontend SSA)");
+        fx.bcx.seal_all_blocks();
+        fx.bcx.finalize(fx.module.target_config());
+    }
 
     // Recover all necessary data from fx, before accessing func will prevent future access to it.
     let symbol_name = fx.symbol_name;
@@ -165,6 +173,12 @@ pub(crate) fn codegen_fn<'tcx>(
         has_inline_asm: !inline_asm.is_empty(),
     };
 
+    let prof_class = if crate::insn_prof::enabled() {
+        crate::insn_prof::fn_class(tcx, instance, inline_hints.cold)
+    } else {
+        0
+    };
+
     CodegenedFunction {
         symbol_name,
         func_id,
@@ -173,6 +187,7 @@ pub(crate) fn codegen_fn<'tcx>(
         func_debug_cx,
         inline_asm,
         inline_hints,
+        prof_class,
     }
 }
 
@@ -188,6 +203,18 @@ pub(crate) fn compile_fn(
     codegened_func: CodegenedFunction,
 ) {
     let _timer = prof.generic_activity_with_arg("compile function", &*codegened_func.symbol_name);
+    let _ip = crate::insn_prof::scope("be: compile function (rest)");
+    crate::insn_prof::fn_begin();
+    let prof_shape = crate::insn_prof::enabled().then(|| {
+        let _ip = crate::insn_prof::scope("prof: function shape");
+        let func = &codegened_func.func;
+        let cfg = cranelift_codegen::flowgraph::ControlFlowGraph::with_function(func);
+        let domtree = cranelift_codegen::dominator_tree::DominatorTree::with_function(func, &cfg);
+        let has_loop = func.layout.blocks().any(|block| {
+            cfg.succ_iter(block).any(|succ| domtree.block_dominates(succ, block))
+        });
+        (func.dfg.num_insts(), func.layout.blocks().count(), has_loop)
+    });
 
     let clif_comments = codegened_func.clif_comments;
     global_asm.push_str(&codegened_func.inline_asm);
@@ -219,6 +246,7 @@ pub(crate) fn compile_fn(
 
     // Define function
     prof.generic_activity("define function").run(|| {
+        let _ip = crate::insn_prof::scope("be: define function (rest)");
         context.want_disasm = should_write_ir;
         match module.define_function(codegened_func.func_id, context) {
             Ok(()) => {}
@@ -278,6 +306,7 @@ pub(crate) fn compile_fn(
 
     // Define debuginfo for function
     prof.generic_activity("generate debug info").run(|| {
+        let _ip = crate::insn_prof::scope("be: debug info");
         if let Some(debug_context) = debug_context {
             codegened_func.func_debug_cx.unwrap().finalize(
                 debug_context,
@@ -286,6 +315,16 @@ pub(crate) fn compile_fn(
             );
         }
     });
+
+    if let Some((insts, blocks, has_loop)) = prof_shape {
+        crate::insn_prof::fn_end(
+            &codegened_func.symbol_name,
+            codegened_func.prof_class,
+            insts,
+            blocks,
+            has_loop,
+        );
+    }
 }
 
 fn verify_func(tcx: TyCtxt<'_>, writer: &crate::pretty_clif::CommentWriter, func: &Function) {
@@ -325,7 +364,10 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
     fx.tcx
         .prof
         .generic_activity("codegen prelude")
-        .run(|| crate::abi::codegen_fn_prelude(fx, start_block));
+        .run(|| {
+            let _ip = crate::insn_prof::scope("cg: prelude");
+            crate::abi::codegen_fn_prelude(fx, start_block)
+        });
 
     let reachable_blocks = traversal::mono_reachable_as_bitset(fx.mir, fx.tcx, fx.instance);
 
@@ -550,6 +592,7 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
                 call_source: _,
             } => {
                 fx.tcx.prof.generic_activity("codegen call").run(|| {
+                    let _ip = crate::insn_prof::scope("cg: codegen call");
                     crate::abi::codegen_terminator_call(
                         fx,
                         mir::SourceInfo { span: *fn_span, ..source_info },

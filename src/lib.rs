@@ -68,6 +68,7 @@ mod discriminant;
 mod driver;
 mod global_asm;
 mod inline;
+mod insn_prof;
 mod inline_asm;
 mod intrinsics;
 mod linkage;
@@ -268,10 +269,12 @@ impl CodegenBackend for CraneliftCodegenBackend {
         _outputs: &OutputFilenames,
         crate_info: &CrateInfo,
     ) -> (CompiledModules, WorkProductMap) {
-        ongoing_codegen
+        let res = ongoing_codegen
             .downcast::<rustc_codegen_ssa::back::write::OngoingCodegen<driver::aot::AotDriver>>()
             .unwrap()
-            .join(sess, incr_comp_session, crate_info)
+            .join(sess, incr_comp_session, crate_info);
+        insn_prof::dump(crate_info.local_crate_name.as_str());
+        res
     }
 }
 
