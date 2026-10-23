@@ -198,6 +198,20 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.cheap_checks", &|runner| {
+        // `count_ones() == 1` without a population count, offsets by a type's size as shifts,
+        // the allocator shims as one jump.
+        for opt in ["0", "2"] {
+            let name = format!("cheap_checks{opt}");
+            runner.run_rustc([
+                "example/cheap_checks.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.probe_unwind", &|runner| {
         // Unwinding from inside stack probes (a stack overflow, a profiler's signal).
         for opt in ["0", "2"] {
