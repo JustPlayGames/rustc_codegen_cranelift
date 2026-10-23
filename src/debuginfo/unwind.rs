@@ -21,6 +21,50 @@ pub(crate) const EXCEPTION_HANDLER_CATCH: u32 = 1;
 /// `.gcc_except_table`; on Windows it catches C++ exceptions only, like LLVM's `catch (...)`
 /// terminate funclet, so that `longjmp` and SEH exceptions don't trigger it.
 pub(crate) const EXCEPTION_HANDLER_TERMINATE: u32 = 2;
+/// The kind of a call site in the SEH handler's table (beside the tags above, which are the
+/// kinds of landing pads) for a call that must abort without a landing pad: plus 0 for
+/// `UnwindTerminateReason::Abi`, plus 1 for `InCleanup`.
+pub(crate) const SEH_KIND_ABORT: u32 = 3;
+
+/// The debug tag of a plain call that must abort when it unwinds (`UnwindAction::Terminate`
+/// without a landing pad, see [`crate::common::terminate_calls`]): one value per reason.
+const TERMINATE_TAG: u32 = 0x7e57_ab00;
+
+pub(crate) fn terminate_tag(reason: UnwindTerminateReason) -> u32 {
+    TERMINATE_TAG
+        + match reason {
+            UnwindTerminateReason::Abi => 0,
+            UnwindTerminateReason::InCleanup => 1,
+        }
+}
+
+/// The return offsets of the plain calls in `code` that must abort when they unwind, with the
+/// reason (0 = `Abi`, 1 = `InCleanup`), in order of offset. Cranelift puts a call's tags at the
+/// end of its call instruction, which is the call site's return address.
+fn terminate_call_sites(code: &cranelift_codegen::CompiledCode) -> Vec<(u32, u32)> {
+    let mut sites = vec![];
+    for list in code.buffer.debug_tags() {
+        if list.pos != cranelift_codegen::MachDebugTagPos::Post {
+            continue;
+        }
+        for tag in list.tags {
+            if let cranelift_codegen::ir::DebugTag::User(value) = *tag
+                && (TERMINATE_TAG..TERMINATE_TAG + 2).contains(&value)
+            {
+                sites.push((list.offset, value - TERMINATE_TAG));
+            }
+        }
+    }
+    sites.sort_unstable();
+    sites.dedup();
+    // A tag that is not at a call site would leave that call listed as one that unwinds.
+    let mut call_sites = code.buffer.call_sites().map(|site| site.ret_addr).peekable();
+    for &(offset, _) in &sites {
+        while call_sites.next_if(|&ret_addr| ret_addr < offset).is_some() {}
+        assert_eq!(call_sites.peek(), Some(&offset), "terminate tag not at a call's return address");
+    }
+    sites
+}
 
 /// The language-specific handler of every function with landing pads on Windows x64, and the
 /// helpers its landing pads call, defined by `seh_runtime.rs`.
@@ -56,10 +100,19 @@ pub(crate) struct UnwindContext {
     win_functions: Vec<WinFunction>,
     uses_seh: bool,
     seh_personality: Option<FuncId>,
+    /// The symbols of the panic functions for `UnwindTerminateReason::{Abi, InCleanup}`, and
+    /// whether a function has call sites the SEH handler aborts at with them.
+    terminate_symbols: [Option<String>; 2],
+    seh_aborts: bool,
 }
 
 impl UnwindContext {
-    pub(crate) fn new(module: &mut dyn Module, eh_personality: &str, pic_eh_frame: bool) -> Self {
+    pub(crate) fn new(
+        module: &mut dyn Module,
+        eh_personality: &str,
+        pic_eh_frame: bool,
+        terminate_symbols: [Option<String>; 2],
+    ) -> Self {
         let endian = match module.isa().endianness() {
             Endianness::Little => RunTimeEndian::Little,
             Endianness::Big => RunTimeEndian::Big,
@@ -159,7 +212,15 @@ impl UnwindContext {
             win_functions: vec![],
             uses_seh,
             seh_personality,
+            terminate_symbols,
+            seh_aborts: false,
         }
+    }
+
+    /// The panic functions the SEH handler calls at call sites that must abort, when there are
+    /// any (see `seh_runtime::define`).
+    pub(crate) fn seh_abort_symbols(&self) -> Option<&[Option<String>; 2]> {
+        self.seh_aborts.then_some(&self.terminate_symbols)
     }
 
     /// Whether this object needs the SEH runtime functions (`seh_runtime.rs`): it has landing
@@ -201,12 +262,16 @@ impl UnwindContext {
                 // the personality would do for call sites without a landing pad. Every
                 // `UnwindAction::Terminate` becomes a landing pad, so nounwind functions keep
                 // their LSDA and abort.
-                let has_landing_pads = context
-                    .compiled_code()
-                    .unwrap()
-                    .buffer
-                    .call_sites()
-                    .any(|call_site| !call_site.exception_handlers.is_empty());
+                // Calls that must abort are left out of the call-site table, which needs the
+                // LSDA too.
+                let terminate_sites = terminate_call_sites(context.compiled_code().unwrap());
+                let has_landing_pads = !terminate_sites.is_empty()
+                    || context
+                        .compiled_code()
+                        .unwrap()
+                        .buffer
+                        .call_sites()
+                        .any(|call_site| !call_site.exception_handlers.is_empty());
                 if cfg!(feature = "unwinding") && has_landing_pads {
                     // FIXME use unique symbol name derived from function name
                     let lsda = module.declare_anonymous_data(false, false).unwrap();
@@ -218,7 +283,7 @@ impl UnwindContext {
                     };
 
                     let mut gcc_except_table_data = GccExceptTable {
-                        call_sites: CallSiteTable(vec![]),
+                        call_sites: CallSiteTable(vec![], false),
                         actions: ActionTable::new(),
                         type_info: TypeInfoTable::new(gimli::DW_EH_PE_udata4),
                     };
@@ -228,7 +293,14 @@ impl UnwindContext {
                         .actions
                         .add(Action { kind: ActionKind::Catch(catch_type), next_action: None });
 
+                    let mut terminate_sites = terminate_sites.iter().map(|&(offset, _)| offset).peekable();
                     for call_site in context.compiled_code().unwrap().buffer.call_sites() {
+                        if terminate_sites.next_if_eq(&call_site.ret_addr).is_some() {
+                            // Not listed: Rust's personality terminates here. The entries
+                            // around it must not be merged over it.
+                            gcc_except_table_data.call_sites.end_run();
+                            continue;
+                        }
                         if call_site.exception_handlers.is_empty() {
                             gcc_except_table_data.call_sites.push(CallSite {
                                 start: u64::from(call_site.ret_addr - 1),
@@ -307,6 +379,11 @@ impl UnwindContext {
                 // Landing pads: a language-specific handler finds them through a table of
                 // (return offset, landing pad offset, kind), sorted by return offset.
                 let mut table = vec![];
+                // Calls that must abort: the handler aborts as a terminate pad would.
+                for (offset, reason) in terminate_call_sites(compiled_code) {
+                    table.push([offset, 0, SEH_KIND_ABORT + reason]);
+                    self.seh_aborts = true;
+                }
                 for call_site in compiled_code.buffer.call_sites() {
                     for &handler in call_site.exception_handlers {
                         match handler {

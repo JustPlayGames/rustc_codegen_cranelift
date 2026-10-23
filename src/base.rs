@@ -117,6 +117,7 @@ pub(crate) fn codegen_fn<'tcx>(
         caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot: None,
         landing_pads: Default::default(),
+        terminate_calls: crate::common::terminate_calls(tcx),
         func_refs: Default::default(),
 
         clif_comments,

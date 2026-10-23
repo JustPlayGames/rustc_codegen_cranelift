@@ -198,6 +198,24 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.terminate_calls", &|runner| {
+        // Calls that must abort when they unwind (plain calls the unwind tables mark) abort,
+        // also when inlined, and their neighbours still unwind; both ways of emitting them.
+        if !runner.panic_unwind_support {
+            return;
+        }
+        for (opt, mode) in [("0", "calls"), ("2", "calls"), ("0", "pads")] {
+            let name = format!("terminate_calls{opt}{mode}");
+            runner.run_rustc([
+                "example/terminate_calls.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cllvm-args=clif-terminate={mode}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {

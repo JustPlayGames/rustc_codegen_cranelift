@@ -8,7 +8,8 @@ use std::borrow::Cow;
 use std::mem;
 
 use cranelift_codegen::ir::{
-    ArgumentPurpose, BlockArg, ExceptionTableData, ExceptionTableItem, ExceptionTag, SigRef,
+    ArgumentPurpose, BlockArg, DebugTag, ExceptionTableData, ExceptionTableItem, ExceptionTag,
+    SigRef,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_module::ModuleError;
@@ -29,7 +30,7 @@ use self::pass_mode::*;
 pub(crate) use self::returning::codegen_return;
 use crate::base::codegen_unwind_terminate;
 use crate::common::LandingPad;
-use crate::debuginfo::{EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE};
+use crate::debuginfo::{EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE, terminate_tag};
 use crate::prelude::*;
 
 struct ArgValue<'tcx> {
@@ -971,14 +972,26 @@ pub(crate) fn codegen_call_with_unwind_action(
         unwind = UnwindAction::Unreachable;
     }
 
-    match unwind {
-        UnwindAction::Continue | UnwindAction::Unreachable => {
+    // A call that must abort when it unwinds is a plain call with a debug tag: the unwind
+    // tables leave it out (Itanium personalities terminate at a call site they don't list) or
+    // mark it to abort (the SEH runtime), so it needs no landing pad and no block of its own.
+    let terminate_tag = match unwind {
+        UnwindAction::Terminate(reason) if fx.terminate_calls => Some(terminate_tag(reason)),
+        _ => None,
+    };
+
+    match (unwind, terminate_tag) {
+        (UnwindAction::Continue | UnwindAction::Unreachable, _)
+        | (UnwindAction::Terminate(_), Some(_)) => {
             let call_inst = match func_ref {
                 CallTarget::Direct(func_ref) => fx.bcx.ins().call(func_ref, call_args),
                 CallTarget::Indirect(sig, func_ptr) => {
                     fx.bcx.ins().call_indirect(sig, func_ptr, call_args)
                 }
             };
+            if let Some(tag) = terminate_tag {
+                fx.bcx.func.debug_tags.set(call_inst, [DebugTag::User(tag)]);
+            }
 
             if let Some(target_block) = target_block {
                 fx.bcx.ins().jump(target_block, &[]);
@@ -993,7 +1006,7 @@ pub(crate) fn codegen_call_with_unwind_action(
                     .collect::<SmallVec<[Value; 2]>>()
             }
         }
-        UnwindAction::Cleanup(_) | UnwindAction::Terminate(_) => {
+        (UnwindAction::Cleanup(_) | UnwindAction::Terminate(_), _) => {
             let returns_types = fx.bcx.func.dfg.signatures[sig_ref]
                 .returns
                 .iter()

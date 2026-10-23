@@ -17,8 +17,14 @@ pub(crate) struct UnwindModule<T> {
 }
 
 impl<T: Module> UnwindModule<T> {
-    pub(crate) fn new(mut module: T, eh_personality: &str, pic_eh_frame: bool) -> Self {
-        let unwind_context = UnwindContext::new(&mut module, eh_personality, pic_eh_frame);
+    pub(crate) fn new(
+        mut module: T,
+        eh_personality: &str,
+        pic_eh_frame: bool,
+        terminate_symbols: [Option<String>; 2],
+    ) -> Self {
+        let unwind_context =
+            UnwindContext::new(&mut module, eh_personality, pic_eh_frame, terminate_symbols);
         UnwindModule { module, unwind_context }
     }
 }
@@ -26,7 +32,8 @@ impl<T: Module> UnwindModule<T> {
 impl UnwindModule<ObjectModule> {
     pub(crate) fn finish(mut self) -> ObjectProduct {
         if self.unwind_context.needs_seh_runtime(&self.module) {
-            crate::seh_runtime::define(&mut self);
+            let abort = self.unwind_context.seh_abort_symbols().cloned();
+            crate::seh_runtime::define(&mut self, abort.as_ref());
         }
         let mut product = self.module.finish();
         self.unwind_context.emit(&mut product);

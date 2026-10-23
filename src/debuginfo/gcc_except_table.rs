@@ -89,7 +89,8 @@ impl GccExceptTable {
     }
 }
 
-pub(super) struct CallSiteTable(pub Vec<CallSite>);
+/// The call-site table and whether its last entry is closed (see [`CallSiteTable::end_run`]).
+pub(super) struct CallSiteTable(pub Vec<CallSite>, pub bool);
 
 impl CallSiteTable {
     /// Adds a call site, or extends the last entry over it when that entry has the same landing
@@ -98,7 +99,9 @@ impl CallSiteTable {
     /// order of their address, and every call that can unwind must have one: a merged entry also
     /// covers the instructions between its calls, but no other call.
     pub(super) fn push(&mut self, call_site: CallSite) {
-        if let Some(last) = self.0.last_mut()
+        let closed = std::mem::replace(&mut self.1, false);
+        if !closed
+            && let Some(last) = self.0.last_mut()
             && last.landing_pad == call_site.landing_pad
             && last.action_entry.map(|action| action.0)
                 == call_site.action_entry.map(|action| action.0)
@@ -108,6 +111,12 @@ impl CallSiteTable {
             return;
         }
         self.0.push(call_site);
+    }
+
+    /// Keeps the next entry from extending the last one: a call between them is left out of
+    /// the table on purpose (a personality terminates at a call site it doesn't find).
+    pub(super) fn end_run(&mut self) {
+        self.1 = true;
     }
 
     fn encoded_size(&self) -> u64 {
