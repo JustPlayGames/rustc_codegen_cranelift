@@ -26,6 +26,7 @@ aot.simd_vector_ops
 aot.volatile_unused
 aot.ssa_adts
 aot.small_mem_copies
+aot.splat_repeat
 aot.backtrace_frames
 aot.powi_libcall_signature
 aot.issue-72793

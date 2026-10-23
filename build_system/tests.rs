@@ -149,6 +149,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.splat_repeat", &|runner| {
+        // [x; n] and simd_splat as 16-byte vector splats: every element type and length.
+        for opt in ["0", "2"] {
+            let name = format!("splat_repeat{opt}");
+            runner.run_rustc([
+                "example/splat_repeat.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
