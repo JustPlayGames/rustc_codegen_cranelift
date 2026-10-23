@@ -25,6 +25,11 @@ const LF_UNION: u16 = 0x1506;
 const LF_MEMBER: u16 = 0x150d;
 const LF_ENUM: u16 = 0x1507;
 const LF_ENUMERATE: u16 = 0x1502;
+const LF_INDEX: u16 = 0x1404;
+
+/// The longest type record LLVM writes (`codeview::MaxRecordLength`, including the length
+/// field); longer field lists are split into `LF_INDEX`-linked continuations.
+const MAX_RECORD_LENGTH: usize = 0xff00;
 
 const LF_LONG: u16 = 0x8003;
 const LF_QUADWORD: u16 = 0x8009;
@@ -100,6 +105,41 @@ impl CvTypeTable {
         index
     }
 
+    /// An `LF_FIELDLIST` of `members` (sub-records without padding). A list longer than a
+    /// record can be is split as LLVM splits it: each part but the last ends with an `LF_INDEX`
+    /// naming the next part, and the parts are added last first, because a record may only
+    /// refer to types before it (link.exe checks). The first part is the field list's index.
+    fn field_list(&mut self, members: impl Iterator<Item = Vec<u8>>) -> u32 {
+        // Room for the record's length and kind, and for the `LF_INDEX` at the end.
+        const MAX_PART: usize = MAX_RECORD_LENGTH - 4 - 8;
+        let mut parts = vec![Vec::new()];
+        for mut member in members {
+            // Sub-records of a field list are aligned with LF_PAD bytes.
+            while member.len() % 4 != 0 {
+                let left = 4 - member.len() % 4;
+                member.push(0xf0 | left as u8);
+            }
+            let part = parts.last_mut().unwrap();
+            if !part.is_empty() && part.len() + member.len() > MAX_PART {
+                parts.push(member);
+            } else {
+                part.extend_from_slice(&member);
+            }
+        }
+        let mut next = None;
+        for part in parts.iter().rev() {
+            next = Some(self.add(LF_FIELDLIST, |r| {
+                r.extend_from_slice(part);
+                if let Some(next) = next {
+                    r.extend_from_slice(&LF_INDEX.to_le_bytes());
+                    r.extend_from_slice(&0u16.to_le_bytes()); // padding
+                    r.extend_from_slice(&u32::to_le_bytes(next));
+                }
+            }));
+        }
+        next.unwrap()
+    }
+
     fn pointer(&mut self, referent: u32) -> u32 {
         if referent < 0x1000 && referent & 0xff00 == 0 {
             return T_64P | referent;
@@ -143,20 +183,15 @@ impl CvTypeTable {
         size: u64,
         members: &[(String, u32, u64)],
     ) -> u32 {
-        let field_list = self.add(LF_FIELDLIST, |r| {
-            for (member_name, ty, offset) in members {
-                r.extend_from_slice(&LF_MEMBER.to_le_bytes());
-                r.extend_from_slice(&MEMBER_ATTRS.to_le_bytes());
-                r.extend_from_slice(&ty.to_le_bytes());
-                numeric(r, *offset);
-                super::codeview::cstr(r, member_name.as_bytes());
-                // Sub-records of a field list are aligned with LF_PAD bytes.
-                while r.len() % 4 != 0 {
-                    let left = 4 - r.len() % 4;
-                    r.push(0xf0 | left as u8);
-                }
-            }
-        });
+        let field_list = self.field_list(members.iter().map(|(member_name, ty, offset)| {
+            let mut r = Vec::new();
+            r.extend_from_slice(&LF_MEMBER.to_le_bytes());
+            r.extend_from_slice(&MEMBER_ATTRS.to_le_bytes());
+            r.extend_from_slice(&ty.to_le_bytes());
+            numeric(&mut r, *offset);
+            super::codeview::cstr(&mut r, super::codeview::truncate(member_name, 4000).as_bytes());
+            r
+        }));
         let count = u16::try_from(members.len()).unwrap_or(u16::MAX);
         let index = self.add(kind, |r| {
             r.extend_from_slice(&count.to_le_bytes());
@@ -185,18 +220,14 @@ impl CvTypeTable {
         underlying: u32,
         enumerators: &[(String, i128)],
     ) -> u32 {
-        let field_list = self.add(LF_FIELDLIST, |r| {
-            for (enumerator, value) in enumerators {
-                r.extend_from_slice(&LF_ENUMERATE.to_le_bytes());
-                r.extend_from_slice(&MEMBER_ATTRS.to_le_bytes());
-                signed_numeric(r, *value);
-                super::codeview::cstr(r, enumerator.as_bytes());
-                while r.len() % 4 != 0 {
-                    let left = 4 - r.len() % 4;
-                    r.push(0xf0 | left as u8);
-                }
-            }
-        });
+        let field_list = self.field_list(enumerators.iter().map(|(enumerator, value)| {
+            let mut r = Vec::new();
+            r.extend_from_slice(&LF_ENUMERATE.to_le_bytes());
+            r.extend_from_slice(&MEMBER_ATTRS.to_le_bytes());
+            signed_numeric(&mut r, *value);
+            super::codeview::cstr(&mut r, super::codeview::truncate(enumerator, 4000).as_bytes());
+            r
+        }));
         let count = u16::try_from(enumerators.len()).unwrap_or(u16::MAX);
         let index = self.add(LF_ENUM, |r| {
             r.extend_from_slice(&count.to_le_bytes());
