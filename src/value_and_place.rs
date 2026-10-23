@@ -957,10 +957,11 @@ pub(crate) fn assert_assignable<'tcx>(
     to_ty: Ty<'tcx>,
     limit: usize,
 ) {
-    if limit == 0 {
+    if limit == 0 || from_ty == to_ty {
         // assert_assignable exists solely to catch bugs in cg_clif. it isn't necessary for
         // soundness. don't attempt to check deep types to avoid exponential behavior in certain
-        // cases.
+        // cases. Identical (interned) types are trivially assignable: skip walking them, which
+        // for fn pointers would normalize both signatures on every write.
         return;
     }
     match (from_ty.kind(), to_ty.kind()) {
