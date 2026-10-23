@@ -44,3 +44,40 @@ pub(crate) fn maybe_known_branch_taken(
         _ => None,
     }
 }
+
+/// If `arg` is a `select` between two constants of which exactly one is `value` (a niche
+/// discriminant: `select(tag == niche, a, b)`), return the select's condition and whether it is
+/// true when `arg == value`. A branch on `arg == value` can then test the condition directly.
+pub(crate) fn maybe_select_of_consts_eq(
+    bcx: &FunctionBuilder<'_>,
+    arg: Value,
+    value: u128,
+) -> Option<(Value, bool)> {
+    let value = u64::try_from(value).ok()?;
+    let ValueDef::Result(arg_inst, 0) = bcx.func.dfg.value_def(arg) else { return None };
+    let InstructionData::Ternary { opcode: Opcode::Select, args: [cond, a, b] } =
+        bcx.func.dfg.insts[arg_inst]
+    else {
+        return None;
+    };
+    let bits = bcx.func.dfg.value_type(arg).bits();
+    if bits > 64 {
+        return None;
+    }
+    let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let value = value & mask;
+    let iconst = |v: Value| {
+        let ValueDef::Result(inst, 0) = bcx.func.dfg.value_def(v) else { return None };
+        match bcx.func.dfg.insts[inst] {
+            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => {
+                Some(imm.bits() as u64 & mask)
+            }
+            _ => None,
+        }
+    };
+    match (iconst(a)? == value, iconst(b)? == value) {
+        (true, false) => Some((cond, true)),
+        (false, true) => Some((cond, false)),
+        _ => None,
+    }
+}

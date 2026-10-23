@@ -523,12 +523,78 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
                         } else {
                             fx.bcx.ins().jump(else_block, &[]);
                         }
+                    } else if let Some((cond, when_true)) = (!is_inverted)
+                        .then(|| {
+                            crate::optimize::peephole::maybe_select_of_consts_eq(
+                                &fx.bcx,
+                                discr,
+                                if test_zero { 0 } else { 1 },
+                            )
+                        })
+                        .flatten()
+                    {
+                        // A niche discriminant: branch on the niche check itself. (`then_value`
+                        // is 0, or 1 of a bool, so `discr == then_value` decides the branch.)
+                        if when_true {
+                            fx.bcx.ins().brif(cond, then_block, &[], else_block, &[]);
+                        } else {
+                            fx.bcx.ins().brif(cond, else_block, &[], then_block, &[]);
+                        }
                     } else {
                         if test_zero {
                             fx.bcx.ins().brif(discr, else_block, &[], then_block, &[]);
                         } else {
                             fx.bcx.ins().brif(discr, then_block, &[], else_block, &[]);
                         }
+                    }
+                } else if targets.iter().len() <= 3 {
+                    // Few targets: compare and branch, as LLVM does for switches without enough
+                    // cases for a jump table. `Switch` turns any run of consecutive values into a
+                    // jump table (a range check, a clamp and an indirect jump), even for the two
+                    // variants of an `Option`. When `otherwise` can't be reached, the last target
+                    // needs no compare.
+                    let otherwise_unreachable = fx.mir[targets.otherwise()].is_empty_unreachable();
+                    let count = targets.iter().len();
+                    let wide = fx.bcx.func.dfg.value_type(discr) == types::I128;
+                    for (i, (value, block)) in targets.iter().enumerate() {
+                        let block = fx.get_block(block);
+                        let last = i + 1 == count;
+                        if last && otherwise_unreachable {
+                            // A single target whose value is not 0 (0 takes the path above): the
+                            // only value possible.
+                            fx.bcx.ins().jump(block, &[]);
+                            break;
+                        }
+                        // The block to go to when `discr` is not `value`. Before the last
+                        // possible target, that is the last target itself.
+                        let next_is_last = i + 2 == count && otherwise_unreachable;
+                        let next = if last {
+                            fx.get_block(targets.otherwise())
+                        } else if next_is_last {
+                            fx.get_block(targets.iter().nth(i + 1).unwrap().1)
+                        } else {
+                            fx.bcx.create_block()
+                        };
+                        if let Some((cond, when_true)) =
+                            crate::optimize::peephole::maybe_select_of_consts_eq(
+                                &fx.bcx, discr, value,
+                            )
+                        {
+                            if when_true {
+                                fx.bcx.ins().brif(cond, block, &[], next, &[]);
+                            } else {
+                                fx.bcx.ins().brif(cond, next, &[], block, &[]);
+                            }
+                        } else if value == 0 && !wide {
+                            fx.bcx.ins().brif(discr, next, &[], block, &[]);
+                        } else {
+                            let is_value = codegen_icmp_imm(fx, IntCC::Equal, discr, value as i128);
+                            fx.bcx.ins().brif(is_value, block, &[], next, &[]);
+                        }
+                        if last || next_is_last {
+                            break;
+                        }
+                        fx.bcx.switch_to_block(next);
                     }
                 } else {
                     let mut switch = ::cranelift_frontend::Switch::new();
