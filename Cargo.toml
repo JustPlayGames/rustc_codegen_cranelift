@@ -24,15 +24,15 @@ smallvec = "1.8.1"
 
 # Uncomment to use an unreleased version of cranelift
 [patch.crates-io]
-# The fork's branch cranelift-compile-speed-4 (Windows x64 try_call and stack probe fixes,
-# relaxable GOT loads on x86-64 ELF, x64 frames without a frame pointer, anonymous data
-# addressed through its section)
-cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
-cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
-cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
-cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
-cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
-cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "69d2af9517d6133600b5baa2c491e225b06398fa" }
+# The fork's branch cranelift-coff-comdat (COMDAT function and data sections on COFF, on
+# cranelift-compile-speed-4: Windows x64 try_call and stack probe fixes, relaxable GOT loads on
+# x86-64 ELF, x64 frames without a frame pointer, anonymous data addressed through its section)
+cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
+cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
+cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
+cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
+cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
+cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "07551dbcf71c0537c4eda94f881fb13dd2c91670" }
 #cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
