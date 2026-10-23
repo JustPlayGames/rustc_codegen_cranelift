@@ -26,12 +26,12 @@ smallvec = "1.8.1"
 [patch.crates-io]
 # The fork's branch cranelift-frameless (Windows x64 try_call and stack probe fixes,
 # relaxable GOT loads on x86-64 ELF, x64 frames without a frame pointer)
-cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
-cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
-cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
-cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
-cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
-cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "8cf993ed81a643ab636af6ccf0ee62e0224404c3" }
+cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
 #cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
