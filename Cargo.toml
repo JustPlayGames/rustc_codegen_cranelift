@@ -24,6 +24,9 @@ smallvec = "1.8.1"
 
 # Uncomment to use an unreleased version of cranelift
 [patch.crates-io]
+# object's writer with hashbrown's hasher instead of SipHash for its symbol map and string
+# tables (vendor/object, see its README-PATCH.md); the files it writes are unchanged.
+object = { path = "vendor/object" }
 # The fork's branch cranelift-trunk-31 (Windows x64 unwinding and stack probes, relaxable GOT
 # loads on x86-64 ELF, frames without a frame pointer, anonymous data via section symbols, volatile
 # accesses kept as written, Windows x64 register preferences, a register allocator per function)
