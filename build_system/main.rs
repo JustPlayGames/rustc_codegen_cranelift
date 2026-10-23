@@ -12,6 +12,7 @@ mod abi_cafe;
 mod bench;
 mod build_backend;
 mod build_sysroot;
+mod codeview_check;
 mod config;
 mod path;
 mod prepare;
