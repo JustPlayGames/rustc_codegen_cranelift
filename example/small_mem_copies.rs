@@ -98,7 +98,44 @@ struct Mixed {
     e: f64,
 }
 
+fn check_repeat<T: Copy + PartialEq + std::fmt::Debug, const N: usize>(x: T) {
+    let a = [black_box(x); N];
+    for (i, e) in black_box(&a).iter().enumerate() {
+        assert_eq!(*e, x, "[{x:?}; {N}] at {i}");
+    }
+}
+
+#[repr(C)]
+struct Repeated {
+    tag: u8,
+    halves: [u16; 13],
+    tail: [u8; 3],
+}
+
+fn repeats() {
+    check_repeat::<u8, 16>(0xa5);
+    check_repeat::<u8, 17>(0x5a);
+    check_repeat::<u8, 100>(7);
+    check_repeat::<u8, 256>(0xfe);
+    check_repeat::<u16, 8>(0xbeef);
+    check_repeat::<u16, 13>(0x1234);
+    check_repeat::<u32, 5>(0xdead_beef);
+    check_repeat::<u32, 33>(42);
+    check_repeat::<u64, 3>(u64::MAX - 1);
+    check_repeat::<u64, 31>(0x0102_0304_0506_0708);
+    check_repeat::<i8, 20>(-3);
+    check_repeat::<f32, 7>(1.5);
+    check_repeat::<f64, 9>(-2.25);
+    check_repeat::<bool, 24>(true);
+    check_repeat::<char, 6>('\u{1f600}');
+    check_repeat::<usize, 4>(usize::MAX / 3);
+    let r = Repeated { tag: 9, halves: [black_box(0x7777); 13], tail: [black_box(1); 3] };
+    let r = black_box(r);
+    assert_eq!((r.tag, r.halves, r.tail), (9, [0x7777; 13], [1; 3]));
+}
+
 fn main() {
+    repeats();
     sizes!(1 2 3 4 5 6 7 8 9 12 15 16 17 23 24 31 32 33 40 47 48 63 64 65 72 96 100 112 120 127 128 129 130 144);
 
     // Element counts other than one: the size is a multiplication of constants.

@@ -455,9 +455,30 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 );
             }
 
-            for i in 0..lane_count {
-                let ret_lane = ret.place_lane(fx, i);
-                ret_lane.write_cvalue(fx, value);
+            // A 128-bit vector of integers or floats: one splat.
+            let vector = if matches!(
+                fx.tcx.sess.target.arch,
+                rustc_target::spec::Arch::X86_64 | rustc_target::spec::Arch::AArch64
+            ) && matches!(
+                ret.layout().backend_repr,
+                rustc_abi::BackendRepr::SimdVector { .. }
+            ) {
+                let vty = clif_vector_type(fx.tcx, ret.layout());
+                let lane = vty.lane_type();
+                (vty.bits() == 128 && (lane.is_int() || lane == types::F32 || lane == types::F64))
+                    .then_some(vty)
+            } else {
+                None
+            };
+            if let Some(vty) = vector {
+                let value = value.load_scalar(fx);
+                let splat = fx.bcx.ins().splat(vty, value);
+                ret.write_cvalue(fx, CValue::by_val(splat, ret.layout()));
+            } else {
+                for i in 0..lane_count {
+                    let ret_lane = ret.place_lane(fx, i);
+                    ret_lane.write_cvalue(fx, value);
+                }
             }
         }
 

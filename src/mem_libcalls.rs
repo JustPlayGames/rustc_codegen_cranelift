@@ -55,6 +55,45 @@ pub(crate) fn emit_vector_copy(
     true
 }
 
+/// Writes `[operand; times]` into `place` by splatting the element into a 16-byte vector and
+/// storing that (and the element for the tail), when the element is a scalar of 1 to 8 bytes and
+/// the array has 16 to [`MAX_INLINE_BYTES`] * 2 bytes, instead of one store per element or a loop.
+/// Returns whether it did.
+pub(crate) fn emit_vector_repeat<'tcx>(
+    fx: &mut crate::FunctionCx<'_, '_, 'tcx>,
+    place: crate::value_and_place::CPlace<'tcx>,
+    operand: crate::value_and_place::CValue<'tcx>,
+    times: u64,
+) -> bool {
+    let elem_size = operand.layout().size.bytes();
+    let total = elem_size * times;
+    if !(16..=2 * MAX_INLINE_BYTES).contains(&total) || !enabled(fx.module.isa()) {
+        return false;
+    }
+    let Some(elem_ty) = fx.clif_type(operand.layout().ty) else { return false };
+    if elem_ty.bytes() as u64 != elem_size
+        || !(elem_ty.is_int() && elem_size <= 8 || elem_ty == types::F32 || elem_ty == types::F64)
+    {
+        return false;
+    }
+    let Some(ptr) = place.try_to_ptr() else { return false };
+    let Some(vector_ty) = elem_ty.by(16 / elem_ty.bytes()) else { return false };
+    let dest = ptr.get_addr(fx);
+    let elem = operand.load_scalar(fx);
+    let vector = fx.bcx.ins().splat(vector_ty, elem);
+    let flags = MemFlagsData::new().with_notrap();
+    let mut offset = 0;
+    while offset + 16 <= total {
+        fx.bcx.ins().store(flags, vector, dest, offset as i32);
+        offset += 16;
+    }
+    while offset < total {
+        fx.bcx.ins().store(flags, elem, dest, offset as i32);
+        offset += elem_size;
+    }
+    true
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Kind {
     Copy,
