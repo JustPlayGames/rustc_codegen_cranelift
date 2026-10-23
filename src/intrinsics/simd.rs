@@ -18,6 +18,86 @@ fn report_simd_type_validation_error(
     fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
 }
 
+/// The Cranelift vector type of a 128-bit vector of integers, when the target lowers such
+/// vectors to vector registers (x86_64, AArch64).
+fn int_vector128_type<'tcx>(
+    fx: &FunctionCx<'_, '_, 'tcx>,
+    layout: TyAndLayout<'tcx>,
+) -> Option<(Type, bool)> {
+    if !matches!(layout.backend_repr, rustc_abi::BackendRepr::SimdVector { .. }) {
+        return None;
+    }
+    if !matches!(
+        fx.tcx.sess.target.arch,
+        rustc_target::spec::Arch::X86_64 | rustc_target::spec::Arch::AArch64
+    ) {
+        return None;
+    }
+    let (_, lane_ty) = layout.ty.simd_size_and_type(fx.tcx);
+    let signed = match lane_ty.kind() {
+        ty::Int(_) => true,
+        ty::Uint(_) => false,
+        _ => return None,
+    };
+    let vty = clif_vector_type(fx.tcx, layout);
+    if vty.bits() != 128 || !vty.lane_type().is_int() {
+        return None;
+    }
+    Some((vty, signed))
+}
+
+/// Integer add, sub, and, or, xor and comparisons on 128-bit vectors as one vector instruction
+/// each instead of a load, operation and store per lane. Returns false when the operation or
+/// types have no such form; the caller then goes lane by lane.
+fn simd_int_vector_binop<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    intrinsic: Symbol,
+    x: CValue<'tcx>,
+    y: CValue<'tcx>,
+    ret: CPlace<'tcx>,
+) -> bool {
+    if x.layout() != y.layout() {
+        return false;
+    }
+    let Some((vty, signed)) = int_vector128_type(fx, x.layout()) else { return false };
+    // Comparisons return a mask vector of the same lane width; the rest the input type.
+    match int_vector128_type(fx, ret.layout()) {
+        Some((ret_vty, _)) if ret_vty == vty => {}
+        _ => return false,
+    }
+    let cc = |s: IntCC, u: IntCC| if signed { s } else { u };
+    let op: &dyn Fn(&mut FunctionCx<'_, '_, 'tcx>, Value, Value) -> Value = match intrinsic {
+        sym::simd_add => &|fx, a, b| fx.bcx.ins().iadd(a, b),
+        sym::simd_sub => &|fx, a, b| fx.bcx.ins().isub(a, b),
+        sym::simd_and => &|fx, a, b| fx.bcx.ins().band(a, b),
+        sym::simd_or => &|fx, a, b| fx.bcx.ins().bor(a, b),
+        sym::simd_xor => &|fx, a, b| fx.bcx.ins().bxor(a, b),
+        _ => {
+            let cc = match intrinsic {
+                sym::simd_eq => IntCC::Equal,
+                sym::simd_ne => IntCC::NotEqual,
+                sym::simd_lt => cc(IntCC::SignedLessThan, IntCC::UnsignedLessThan),
+                sym::simd_le => cc(IntCC::SignedLessThanOrEqual, IntCC::UnsignedLessThanOrEqual),
+                sym::simd_gt => cc(IntCC::SignedGreaterThan, IntCC::UnsignedGreaterThan),
+                sym::simd_ge => {
+                    cc(IntCC::SignedGreaterThanOrEqual, IntCC::UnsignedGreaterThanOrEqual)
+                }
+                _ => return false,
+            };
+            let a = x.load_scalar(fx);
+            let b = y.load_scalar(fx);
+            let res = fx.bcx.ins().icmp(cc, a, b);
+            ret.write_cvalue(fx, CValue::by_val(res, ret.layout()));
+            return true;
+        }
+    };
+    let a = x.load_scalar(fx);
+    let b = y.load_scalar(fx);
+    let res = op(fx, a, b);
+    ret.write_cvalue(fx, CValue::by_val(res, ret.layout()));
+    true
+}
+
 pub(super) fn codegen_simd_intrinsic_call<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     intrinsic: Symbol,
@@ -54,7 +134,12 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 return;
             }
 
-            // FIXME use vector instructions when possible
+            if simd_int_vector_binop(fx, intrinsic, x, y, ret) {
+                let ret_block = fx.get_block(target);
+                fx.bcx.ins().jump(ret_block, &[]);
+                return;
+            }
+
             simd_pair_for_each_lane(fx, x, y, ret, &|fx, lane_ty, res_lane_ty, x_lane, y_lane| {
                 let res_lane = match (lane_ty.kind(), intrinsic) {
                     (ty::Uint(_), sym::simd_eq) => fx.bcx.ins().icmp(IntCC::Equal, x_lane, y_lane),
@@ -420,7 +505,12 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
         | sym::simd_xor => {
             intrinsic_args!(fx, args => (x, y); intrinsic);
 
-            // FIXME use vector instructions when possible
+            if simd_int_vector_binop(fx, intrinsic, x, y, ret) {
+                let ret_block = fx.get_block(target);
+                fx.bcx.ins().jump(ret_block, &[]);
+                return;
+            }
+
             simd_pair_for_each_lane(fx, x, y, ret, &|fx, lane_ty, _ret_lane_ty, x_lane, y_lane| {
                 codegen_f16_f128::maybe_with_f16_to_f32_pair(
                     fx,
@@ -935,7 +1025,20 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 Endian::Big => Box::new(0..lane_count) as Box<dyn Iterator<Item = u64>>,
                 Endian::Little => Box::new((0..lane_count).rev()) as Box<dyn Iterator<Item = u64>>,
             };
+            // A 128-bit integer vector's sign bits in one instruction (pmovmskb and the like),
+            // lane 0 in bit 0 as little endian wants.
+            let vector = match fx.tcx.sess.target.endian {
+                Endian::Little => int_vector128_type(fx, a.layout()).is_some(),
+                Endian::Big => false,
+            };
+            if vector {
+                let v = a.load_scalar(fx);
+                res = fx.bcx.ins().vhigh_bits(res_type, v);
+            }
             for lane in lanes {
+                if vector {
+                    break;
+                }
                 let a_lane = a.value_lane(fx, lane).load_scalar(fx);
 
                 // extract sign bit of an int
