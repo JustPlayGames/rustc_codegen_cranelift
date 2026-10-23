@@ -1078,7 +1078,7 @@ fn codegen_stmt<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, cur_block: Block, stmt:
                 let count = codegen_operand(fx, count).load_scalar(fx);
 
                 let bytes = if elem_size != 1 {
-                    fx.bcx.ins().imul_imm_u(count, elem_size as i64)
+                    crate::common::mul_by_const(&mut fx.bcx, count, elem_size as i64)
                 } else {
                     count
                 };

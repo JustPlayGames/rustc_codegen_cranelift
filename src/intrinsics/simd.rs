@@ -1133,7 +1133,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 let offset_lane = offset.value_lane(fx, lane_idx).load_scalar(fx);
 
                 let ptr_diff = if pointee_size != 1 {
-                    fx.bcx.ins().imul_imm_u(offset_lane, pointee_size as i64)
+                    crate::common::mul_by_const(&mut fx.bcx, offset_lane, pointee_size as i64)
                 } else {
                     offset_lane
                 };

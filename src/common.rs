@@ -585,3 +585,21 @@ pub(crate) fn terminate_symbols(tcx: TyCtxt<'_>) -> [Option<String>; 2] {
         Some(tcx.symbol_name(Instance::mono(tcx, def_id)).name.to_owned())
     })
 }
+
+/// `v * k` for a multiplier known at compile time, such as a type's size: nothing for 1, a shift
+/// for powers of two (which x86_64 folds into an address's scale), a multiply otherwise. Without
+/// optimizations Cranelift lowers an `imul` by a constant as written: three cycles of latency on
+/// every pointer offset and index.
+pub(crate) fn mul_by_const(bcx: &mut FunctionBuilder<'_>, v: Value, k: i64) -> Value {
+    let ty = bcx.func.dfg.value_type(v);
+    let k = k as u64;
+    if k == 0 {
+        bcx.ins().iconst(ty, 0)
+    } else if k == 1 {
+        v
+    } else if k.is_power_of_two() && k.trailing_zeros() < ty.bits() {
+        bcx.ins().ishl_imm_u(v, i64::from(k.trailing_zeros()))
+    } else {
+        bcx.ins().imul_imm_u(v, k as i64)
+    }
+}

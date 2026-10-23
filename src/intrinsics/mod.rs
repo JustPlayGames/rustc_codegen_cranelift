@@ -489,7 +489,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let elem_size: u64 = fx.layout_of(elem_ty).size.bytes();
             assert_eq!(args.len(), 3);
             let byte_amount = if elem_size != 1 {
-                fx.bcx.ins().imul_imm_u(count, elem_size as i64)
+                crate::common::mul_by_const(&mut fx.bcx, count, elem_size as i64)
             } else {
                 count
             };
@@ -508,7 +508,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let elem_size: u64 = fx.layout_of(elem_ty).size.bytes();
             assert_eq!(args.len(), 3);
             let byte_amount = if elem_size != 1 {
-                fx.bcx.ins().imul_imm_u(count, elem_size as i64)
+                crate::common::mul_by_const(&mut fx.bcx, count, elem_size as i64)
             } else {
                 count
             };
@@ -635,7 +635,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let pointee_ty = base.layout().ty.builtin_deref(true).unwrap();
             let pointee_size = fx.layout_of(pointee_ty).size.bytes();
             let ptr_diff = if pointee_size != 1 {
-                fx.bcx.ins().imul_imm_u(offset, pointee_size as i64)
+                crate::common::mul_by_const(&mut fx.bcx, offset, pointee_size as i64)
             } else {
                 offset
             };
@@ -661,7 +661,7 @@ fn codegen_regular_intrinsic_call<'tcx>(
             let pointee_ty = dst.layout().ty.builtin_deref(true).unwrap();
             let pointee_size = fx.layout_of(pointee_ty).size.bytes();
             let count = if pointee_size != 1 {
-                fx.bcx.ins().imul_imm_u(count, pointee_size as i64)
+                crate::common::mul_by_const(&mut fx.bcx, count, pointee_size as i64)
             } else {
                 count
             };
@@ -1658,7 +1658,13 @@ fn volatile_copy(
 /// function itself rather than a Cranelift libcall: libcalls whose size turns out constant become
 /// plain loads and stores (`mem_libcalls`), which Cranelift may merge or remove, while a call is
 /// always made.
-fn volatile_mem_call(fx: &mut FunctionCx<'_, '_, '_>, name: &str, dst: Value, b: Value, size: Value) {
+fn volatile_mem_call(
+    fx: &mut FunctionCx<'_, '_, '_>,
+    name: &str,
+    dst: Value,
+    b: Value,
+    size: Value,
+) {
     let ptr = AbiParam::new(fx.pointer_type);
     let b_param = if name == "memset" { AbiParam::new(types::I32) } else { ptr };
     fx.lib_call(name, vec![ptr, b_param, ptr], vec![], &[dst, b, size]);

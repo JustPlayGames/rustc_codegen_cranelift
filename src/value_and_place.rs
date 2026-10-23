@@ -273,8 +273,11 @@ impl<'tcx> CValue<'tcx> {
             CValueInner::ByVal(_) | CValueInner::ByValPair(_, _) => unreachable!(),
             CValueInner::ByRef(ptr, None) => {
                 let lane_idx = clif_intcast(fx, lane_idx, fx.pointer_type, false);
-                let field_offset =
-                    fx.bcx.ins().imul_imm_u(lane_idx, lane_layout.size.bytes() as i64);
+                let field_offset = crate::common::mul_by_const(
+                    &mut fx.bcx,
+                    lane_idx,
+                    lane_layout.size.bytes() as i64,
+                );
                 let field_ptr = ptr.offset_value(fx, field_offset);
                 CValue::by_ref(field_ptr, lane_layout)
             }
@@ -860,10 +863,11 @@ impl<'tcx> CPlace<'tcx> {
             CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => unreachable!(),
             CPlaceInner::Addr(ptr, None) => {
                 let lane_idx = clif_intcast(fx, lane_idx, fx.pointer_type, false);
-                let field_offset = fx
-                    .bcx
-                    .ins()
-                    .imul_imm_u(lane_idx, i64::try_from(lane_layout.size.bytes()).unwrap());
+                let field_offset = crate::common::mul_by_const(
+                    &mut fx.bcx,
+                    lane_idx,
+                    i64::try_from(lane_layout.size.bytes()).unwrap(),
+                );
                 let field_ptr = ptr.offset_value(fx, field_offset);
                 CPlace::for_ptr(field_ptr, lane_layout).write_cvalue(fx, value);
             }
@@ -890,7 +894,8 @@ impl<'tcx> CPlace<'tcx> {
             _ => bug!("place_index({:?})", self.layout().ty),
         };
 
-        let offset = fx.bcx.ins().imul_imm_u(index, elem_layout.size.bytes() as i64);
+        let offset =
+            crate::common::mul_by_const(&mut fx.bcx, index, elem_layout.size.bytes() as i64);
 
         CPlace::for_ptr(ptr.offset_value(fx, offset), elem_layout)
     }

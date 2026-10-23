@@ -190,7 +190,7 @@ pub(crate) fn size_and_align_of<'tcx>(
             // The info in this case is the length of the str, so the size is that
             // times the unit size.
             (
-                fx.bcx.ins().imul_imm_u(info.unwrap(), unit.size.bytes() as i64),
+                crate::common::mul_by_const(&mut fx.bcx, info.unwrap(), unit.size.bytes() as i64),
                 fx.bcx.ins().iconst(fx.pointer_type, unit.align.bytes() as i64),
             )
         }
