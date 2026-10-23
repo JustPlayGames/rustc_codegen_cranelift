@@ -417,8 +417,15 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
             let (file_id, line, column) =
                 debug_context.get_span_loc(self.tcx, self.mir.span, source_info.span);
 
+            // Scopes only matter for the lexical blocks of variables (full debuginfo): leaving
+            // them out otherwise keeps one source location per position.
+            let scope = if self.tcx.sess.opts.debuginfo == rustc_session::config::DebugInfo::Full {
+                source_info.scope.as_u32()
+            } else {
+                0
+            };
             let source_loc =
-                self.func_debug_cx.as_mut().unwrap().add_dbg_loc(file_id, line, column);
+                self.func_debug_cx.as_mut().unwrap().add_dbg_loc(file_id, line, column, scope);
             self.bcx.set_srcloc(source_loc);
         }
     }

@@ -124,6 +124,9 @@ pub(crate) fn codegen_fn<'tcx>(
     };
 
     tcx.prof.generic_activity("codegen clif ir").run(|| codegen_fn_body(&mut fx, start_block));
+    if fx.func_debug_cx.is_some() {
+        crate::debuginfo::define_variables(&mut fx, type_dbg);
+    }
     fx.bcx.seal_all_blocks();
     fx.bcx.finalize(fx.module.target_config());
 

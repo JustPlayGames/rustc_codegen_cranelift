@@ -21,6 +21,14 @@ pub(crate) fn analyze(fx: &FunctionCx<'_, '_, '_>) -> IndexVec<Local, SsaKind> {
     let mut flag_map =
         fx.mir.local_decls.iter().map(|_| SsaKind::MaybeSsa).collect::<IndexVec<Local, SsaKind>>();
 
+    // Unoptimized builds with full debuginfo keep every user variable in memory, as LLVM does at
+    // -O0, so that debuggers find it at one frame offset throughout the function.
+    if let Some(vars) = debug_variable_locals(fx) {
+        for local in vars.iter() {
+            flag_map[local] = SsaKind::NotSsa;
+        }
+    }
+
     for bb in fx.mir.basic_blocks.iter() {
         for stmt in bb.statements.iter() {
             if let Assign(place_and_rval) = &stmt.kind
@@ -32,4 +40,24 @@ pub(crate) fn analyze(fx: &FunctionCx<'_, '_, '_>) -> IndexVec<Local, SsaKind> {
     }
 
     flag_map
+}
+
+/// The locals that hold user variables, when they are to be kept in memory for the debugger
+/// (unoptimized builds with full debuginfo).
+pub(crate) fn debug_variable_locals(
+    fx: &FunctionCx<'_, '_, '_>,
+) -> Option<rustc_index::bit_set::DenseBitSet<Local>> {
+    if fx.debug_context.is_none()
+        || fx.tcx.sess.opts.debuginfo != rustc_session::config::DebugInfo::Full
+        || fx.tcx.sess.opts.optimize != rustc_session::config::OptLevel::No
+    {
+        return None;
+    }
+    let mut set = rustc_index::bit_set::DenseBitSet::new_empty(fx.mir.local_decls.len());
+    for var in &fx.mir.var_debug_info {
+        if let VarDebugInfoContents::Place(place) = var.value {
+            set.insert(place.local);
+        }
+    }
+    Some(set)
 }

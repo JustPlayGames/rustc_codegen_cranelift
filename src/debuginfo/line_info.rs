@@ -157,8 +157,15 @@ impl DebugContext {
 }
 
 impl FunctionDebugContext {
-    pub(crate) fn add_dbg_loc(&mut self, file_id: FileId, line: u64, column: u64) -> SourceLoc {
-        let (index, _) = self.source_loc_set.insert_full((file_id, line, column));
+    /// A Cranelift source location for a position in `scope` (a MIR `SourceScope`).
+    pub(crate) fn add_dbg_loc(
+        &mut self,
+        file_id: FileId,
+        line: u64,
+        column: u64,
+        scope: u32,
+    ) -> SourceLoc {
+        let (index, _) = self.source_loc_set.insert_full((file_id, line, column, scope));
         SourceLoc::new(u32::try_from(index).unwrap())
     }
 
@@ -187,8 +194,8 @@ impl FunctionDebugContext {
             let loc = loc.as_abs();
             debug_context.dwarf.unit.line_program.row().address_offset = u64::from(start);
             if !loc.is_default() {
-                let source_loc = self.source_loc_set[loc.bits() as usize];
-                create_row_for_span(debug_context, source_loc);
+                let (file_id, line, column, _) = self.source_loc_set[loc.bits() as usize];
+                create_row_for_span(debug_context, (file_id, line, column));
             } else {
                 create_row_for_span(debug_context, self.function_source_loc);
             }

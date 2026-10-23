@@ -27,6 +27,15 @@ const S_FRAMEPROC: u16 = 0x1012;
 const S_OBJNAME: u16 = 0x1101;
 const S_GPROC32: u16 = 0x1110;
 const S_COMPILE3: u16 = 0x113c;
+const S_LOCAL: u16 = 0x113e;
+const S_DEFRANGE_FRAMEPOINTER_REL: u16 = 0x1142;
+const S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE: u16 = 0x1144;
+
+/// `S_LOCAL` flags: the variable is a parameter.
+const CV_LVARFLAG_ISPARAM: u16 = 0x0001;
+/// `S_FRAMEPROC` flags: locals and parameters are addressed from the stack pointer (RSP / SP),
+/// which Cranelift keeps fixed after the prologue.
+const FRAMEPROC_SP_BASED: u32 = (1 << 14) | (1 << 16);
 
 const LF_PROCEDURE: u16 = 0x1008;
 const LF_ARGLIST: u16 = 0x1201;
@@ -63,8 +72,18 @@ struct CvLine {
     line: u32,
 }
 
+struct CvLocal {
+    name: String,
+    type_index: u32,
+    is_param: bool,
+    sp_offset: i32,
+    /// Where the variable is in scope; `None`: the whole function.
+    ranges: Option<Vec<(u32, u32)>>,
+}
+
 struct CvFunction {
     func_id: FuncId,
+    locals: Vec<CvLocal>,
     name: String,
     code_len: u32,
     /// Offset of the first instruction with a source location of its own (after the prologue).
@@ -85,6 +104,7 @@ pub(crate) struct CodeViewUnit {
     files: Vec<CvFile>,
     file_map: FxHashMap<FileId, u32>,
     functions: Vec<CvFunction>,
+    pub(super) types: super::codeview_types::CvTypeTable,
 }
 
 impl CodeViewUnit {
@@ -109,6 +129,19 @@ impl CodeViewUnit {
             files: Vec::new(),
             file_map: FxHashMap::default(),
             functions: Vec::new(),
+            types: {
+                // .debug$T starts with an empty argument list and `void ()` (`PROC_TYPE`).
+                let mut types = CV_SIGNATURE_C13.to_le_bytes().to_vec();
+                type_record(&mut types, LF_ARGLIST, |r| r.extend_from_slice(&0u32.to_le_bytes()));
+                type_record(&mut types, LF_PROCEDURE, |r| {
+                    r.extend_from_slice(&T_VOID.to_le_bytes()); // return type
+                    r.push(0); // calling convention: near C
+                    r.push(0); // function attributes
+                    r.extend_from_slice(&0u16.to_le_bytes()); // parameter count
+                    r.extend_from_slice(&TYPE_INDEX_BEGIN.to_le_bytes()); // argument list
+                });
+                super::codeview_types::CvTypeTable::new(types, PROC_TYPE + 1)
+            },
         })
     }
 
@@ -163,8 +196,11 @@ impl CodeViewUnit {
         func_id: FuncId,
         info: CvFunctionInfo,
         context: &Context,
-        source_locs: &indexmap::IndexSet<(FileId, u64, u64)>,
+        source_locs: &indexmap::IndexSet<(FileId, u64, u64, u32)>,
         function_loc: (FileId, u64, u64),
+        variables: &[super::variables::DebugVariable],
+        scope_parents: &[Option<u32>],
+        scope_ranges: &[Vec<(u32, u32)>],
     ) -> CodeOffset {
         let mcr = context.compiled_code().unwrap();
         let code_len = mcr.buffer.total_size();
@@ -180,7 +216,8 @@ impl CodeViewUnit {
                 if body_start.is_none() {
                     body_start = Some(start);
                 }
-                source_locs[loc.bits() as usize]
+                let (file_id, line, column, _) = source_locs[loc.bits() as usize];
+                (file_id, line, column)
             };
             if line == 0 || line > MAX_LINE {
                 continue;
@@ -196,8 +233,30 @@ impl CodeViewUnit {
             }
         }
 
+        let mut locals = Vec::new();
+        if let Some(frame_layout) = mcr.buffer.frame_layout() {
+            for var in variables {
+                let Some(sp_offset) = var.sp_offset(frame_layout) else { continue };
+                let Ok(sp_offset) = i32::try_from(sp_offset) else { continue };
+                let scope = var.scope as usize;
+                let ranges = match scope_parents.get(scope) {
+                    Some(Some(_)) if scope_ranges[scope].is_empty() => continue,
+                    Some(Some(_)) => Some(scope_ranges[scope].clone()),
+                    _ => None,
+                };
+                locals.push(CvLocal {
+                    name: var.name.clone(),
+                    type_index: var.cv_type,
+                    is_param: var.arg_index.is_some(),
+                    sp_offset,
+                    ranges,
+                });
+            }
+        }
+
         self.functions.push(CvFunction {
             func_id,
+            locals,
             name: info.name,
             code_len,
             body_start: body_start.unwrap_or(0),
@@ -208,8 +267,8 @@ impl CodeViewUnit {
 
     pub(crate) fn emit(&self, product: &mut ObjectProduct) {
         let mut out = Vec::new();
-        // (offset in the section, function, true = SECREL, false = SECTION)
-        let mut relocs: Vec<(usize, FuncId, bool)> = Vec::new();
+        // (offset in the section, function, true = SECREL / false = SECTION, addend)
+        let mut relocs: Vec<(usize, FuncId, bool, i64)> = Vec::new();
 
         out.extend_from_slice(&CV_SIGNATURE_C13.to_le_bytes());
 
@@ -264,8 +323,8 @@ impl CodeViewUnit {
                     // A record is at most 64 KiB: cut very long (generic) names.
                     cstr(r, truncate(&func.name, 4096).as_bytes());
                 });
-                relocs.push((base + 32, func.func_id, true));
-                relocs.push((base + 36, func.func_id, false));
+                relocs.push((base + 32, func.func_id, true, 0));
+                relocs.push((base + 36, func.func_id, false, 0));
                 record(out, S_FRAMEPROC, |r| {
                     r.extend_from_slice(&0u32.to_le_bytes()); // cbFrame
                     r.extend_from_slice(&0u32.to_le_bytes()); // cbPad
@@ -273,9 +332,39 @@ impl CodeViewUnit {
                     r.extend_from_slice(&0u32.to_le_bytes()); // cbSaveRegs
                     r.extend_from_slice(&0u32.to_le_bytes()); // offExHdr
                     r.extend_from_slice(&0u16.to_le_bytes()); // sectExHdr
-                    // Locals and parameters are addressed from the frame pointer (RBP / X29).
-                    r.extend_from_slice(&((2u32 << 14) | (2u32 << 16)).to_le_bytes());
+                    r.extend_from_slice(&FRAMEPROC_SP_BASED.to_le_bytes());
                 });
+                for local in &func.locals {
+                    record(out, S_LOCAL, |r| {
+                        r.extend_from_slice(&local.type_index.to_le_bytes());
+                        let flags = if local.is_param { CV_LVARFLAG_ISPARAM } else { 0 };
+                        r.extend_from_slice(&flags.to_le_bytes());
+                        cstr(r, local.name.as_bytes());
+                    });
+                    let Some(ranges) = &local.ranges else {
+                        record(out, S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, |r| {
+                            r.extend_from_slice(&local.sp_offset.to_le_bytes());
+                        });
+                        continue;
+                    };
+                    for &(start, end) in ranges {
+                        // A range covers at most 0xffff bytes.
+                        let mut start = start;
+                        while start < end {
+                            let len = (end - start).min(0xffff);
+                            let base = out.len();
+                            record(out, S_DEFRANGE_FRAMEPOINTER_REL, |r| {
+                                r.extend_from_slice(&local.sp_offset.to_le_bytes());
+                                r.extend_from_slice(&0u32.to_le_bytes()); // start (SECREL)
+                                r.extend_from_slice(&0u16.to_le_bytes()); // section (SECTION)
+                                r.extend_from_slice(&(len as u16).to_le_bytes());
+                            });
+                            relocs.push((base + 8, func.func_id, true, i64::from(start)));
+                            relocs.push((base + 12, func.func_id, false, 0));
+                            start += len;
+                        }
+                    }
+                }
                 record(out, S_END, |_| {});
             });
 
@@ -288,8 +377,8 @@ impl CodeViewUnit {
                 out.extend_from_slice(&0u16.to_le_bytes()); // segCon (SECTION)
                 out.extend_from_slice(&0u16.to_le_bytes()); // flags: no columns
                 out.extend_from_slice(&func.code_len.to_le_bytes());
-                relocs.push((base, func.func_id, true));
-                relocs.push((base + 4, func.func_id, false));
+                relocs.push((base, func.func_id, true, 0));
+                relocs.push((base + 4, func.func_id, false, 0));
 
                 for block in func.lines.chunk_by(|a, b| a.file == b.file) {
                     let n = u32::try_from(block.len()).unwrap();
@@ -308,25 +397,15 @@ impl CodeViewUnit {
         subsection(&mut out, DEBUG_S_FILECHKSMS, |out| out.extend_from_slice(&checksums));
         subsection(&mut out, DEBUG_S_STRINGTABLE, |out| out.extend_from_slice(&strings));
 
-        // .debug$T: an empty argument list and `void ()` (`PROC_TYPE`).
-        let mut types = CV_SIGNATURE_C13.to_le_bytes().to_vec();
-        type_record(&mut types, LF_ARGLIST, |r| r.extend_from_slice(&0u32.to_le_bytes()));
-        type_record(&mut types, LF_PROCEDURE, |r| {
-            r.extend_from_slice(&T_VOID.to_le_bytes()); // return type
-            r.push(0); // calling convention: near C
-            r.push(0); // function attributes
-            r.extend_from_slice(&0u16.to_le_bytes()); // parameter count
-            r.extend_from_slice(&TYPE_INDEX_BEGIN.to_le_bytes()); // argument list
-        });
         let types_section =
             product.object.add_section(Vec::new(), b".debug$T".to_vec(), SectionKind::Debug);
-        product.object.section_mut(types_section).set_data(types, 4);
+        product.object.section_mut(types_section).set_data(self.types.data.clone(), 4);
 
         let section =
             product.object.add_section(Vec::new(), b".debug$S".to_vec(), SectionKind::Debug);
         // COFF relocations have implicit addends: set the data first.
         product.object.section_mut(section).set_data(out, 4);
-        for (offset, func_id, secrel) in relocs {
+        for (offset, func_id, secrel, addend) in relocs {
             let symbol = product.function_symbol(func_id);
             let (kind, size) = if secrel {
                 (RelocationKind::SectionOffset, 32)
@@ -345,7 +424,7 @@ impl CodeViewUnit {
                             encoding: RelocationEncoding::Generic,
                             size,
                         },
-                        addend: 0,
+                        addend,
                     },
                 )
                 .unwrap();
@@ -353,7 +432,7 @@ impl CodeViewUnit {
     }
 }
 
-fn truncate(s: &str, max: usize) -> &str {
+pub(super) fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
@@ -364,7 +443,7 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-fn cstr(out: &mut Vec<u8>, s: &[u8]) {
+pub(super) fn cstr(out: &mut Vec<u8>, s: &[u8]) {
     // CodeView names are NUL-terminated: an embedded NUL would cut the name short.
     out.extend(s.iter().map(|&b| if b == 0 { b'?' } else { b }));
     out.push(0);
@@ -389,7 +468,7 @@ fn subsection(out: &mut Vec<u8>, kind: u32, f: impl FnOnce(&mut Vec<u8>)) {
 }
 
 /// A type record: length (excluding itself), kind, contents, padded to 4 bytes with LF_PAD bytes.
-fn type_record(out: &mut Vec<u8>, kind: u16, f: impl FnOnce(&mut Vec<u8>)) {
+pub(super) fn type_record(out: &mut Vec<u8>, kind: u16, f: impl FnOnce(&mut Vec<u8>)) {
     let start = out.len();
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&kind.to_le_bytes());
