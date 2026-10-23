@@ -72,6 +72,7 @@ mod inline_asm;
 mod intrinsics;
 mod linkage;
 mod main_shim;
+mod merge_blocks;
 mod mem_libcalls;
 mod move_forwarding;
 mod num;
