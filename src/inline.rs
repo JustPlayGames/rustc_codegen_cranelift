@@ -228,14 +228,16 @@ impl Inline for Inliner<'_> {
 }
 
 /// Inlines calls between the functions of one codegen unit (see the module documentation).
-pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
+/// Returns which functions had calls inlined into them (empty when nothing could be inlined).
+pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) -> Vec<bool> {
     if mode == InlineMode::Off || funcs.len() < 2 {
-        return;
+        return vec![];
     }
     // Nothing to do when no function could be inlined.
     if mode == InlineMode::Always && !funcs.iter().any(|f| f.inline_hints.always) {
-        return;
+        return vec![];
     }
+    let mut changed = vec![false; funcs.len()];
     let index: FxHashMap<FuncId, usize> =
         funcs.iter().enumerate().map(|(i, f)| (f.func_id, i)).collect();
     let mut candidates: Vec<Candidate> = funcs
@@ -325,6 +327,7 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
                 panic!("inlining into {} failed: {err:?}", funcs[idx].symbol_name);
             }
             if inlined > 0 {
+                changed[idx] = true;
                 untry_terminate_calls(&mut ctx.func);
             }
             share_inlined_slots(&mut ctx.func, &groups);
@@ -337,6 +340,63 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
         }
         done[idx] = true;
     }
+    changed
+}
+
+/// The `#[inline(always)]` functions with local linkage that nothing refers to any more once
+/// their calls are inlined: compiling them would only produce code that no one can reach (the
+/// linker drops it, or keeps it as dead weight where functions share one section).
+///
+/// A local function can only be referred to from its own codegen unit: by an instruction of
+/// another of its functions, or from outside them (`outside_refs`: vtables and function pointers
+/// in constants, the entry wrapper). Functions that had nothing inlined refer to exactly the
+/// functions they import (`ext_funcs`, as no call of theirs went away); the others are scanned.
+/// The caller excludes codegen units whose assembly may name a function.
+pub(crate) fn unreferenced_inlined(
+    funcs: &[CodegenedFunction],
+    changed: &[bool],
+    outside_refs: &rustc_data_structures::fx::FxHashSet<FuncId>,
+    is_local: impl Fn(FuncId) -> bool,
+) -> Vec<bool> {
+    if changed.is_empty() {
+        return vec![];
+    }
+    let mut referenced = outside_refs.clone();
+    for (f, &changed) in funcs.iter().zip(changed) {
+        let func = &f.func;
+        if !changed {
+            for ext in func.dfg.ext_funcs.values() {
+                if let ir::ExternalName::User(name) = ext.name {
+                    let name = &func.params.user_named_funcs()[name];
+                    if name.namespace == 0 && name.index != f.func_id.as_u32() {
+                        referenced.insert(FuncId::from_u32(name.index));
+                    }
+                }
+            }
+            continue;
+        }
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                let func_ref = match func.dfg.insts[inst] {
+                    InstructionData::Call { func_ref, .. }
+                    | InstructionData::TryCall { func_ref, .. }
+                    | InstructionData::FuncAddr { func_ref, .. } => func_ref,
+                    _ => continue,
+                };
+                if let Some(id) = callee_func_id(func, func_ref)
+                    && id != f.func_id
+                {
+                    referenced.insert(id);
+                }
+            }
+        }
+    }
+    funcs
+        .iter()
+        .map(|f| {
+            f.inline_hints.always && !referenced.contains(&f.func_id) && is_local(f.func_id)
+        })
+        .collect()
 }
 
 /// Makes the tagged calls that the inliner turned into `try_call`s (callees inlined at a

@@ -29,6 +29,9 @@ pub(crate) struct ConstantCx<'tcx> {
     /// The functions called in this codegen unit, declared at their first call: a declaration
     /// costs the symbol name, the signature and a lookup by name in the module.
     pub(crate) function_ids: FxHashMap<Instance<'tcx>, FuncId>,
+    /// The functions whose address some data object of this codegen unit holds (vtables,
+    /// function pointers in constants and statics).
+    pub(crate) data_func_refs: FxHashSet<FuncId>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -489,6 +492,7 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                 GlobalAlloc::Function { instance, .. } => {
                     assert_eq!(addend, 0);
                     let func_id = crate::abi::import_function(tcx, module, instance);
+                    cx.data_func_refs.insert(func_id);
                     let local_func_id = module.declare_func_in_data(func_id, &mut data);
                     data.write_function_addr(offset.bytes() as u32, local_func_id);
                     continue;

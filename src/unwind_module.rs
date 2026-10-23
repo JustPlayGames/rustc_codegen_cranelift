@@ -106,6 +106,8 @@ impl<T: Module> Module for UnwindModule<T> {
         Ok(())
     }
 
+    /// Code without unwind information (it never unwinds: a trap standing in for a function no
+    /// one calls).
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
@@ -114,7 +116,8 @@ impl<T: Module> Module for UnwindModule<T> {
         relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
         // Only for code that needs no unwind info: a jump to another function (see
-        // `create_wrapper_function`), which never has a frame of its own.
+        // `create_wrapper_function`) or the trap standing in for a function that inlining left
+        // unreferenced, neither of which has a frame of its own.
         self.module.define_function_bytes(func_id, alignment, bytes, relocs)
     }
 

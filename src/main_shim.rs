@@ -13,6 +13,7 @@ pub(crate) fn maybe_create_entry_wrapper(
     module: &mut dyn Module,
     is_jit: bool,
     is_primary_cgu: bool,
+    refs: &mut Vec<FuncId>,
 ) {
     let (main_def_id, sigpipe) = match tcx.entry_fn(()) {
         Some((def_id, entry_ty)) => (
@@ -33,7 +34,7 @@ pub(crate) fn maybe_create_entry_wrapper(
         return;
     }
 
-    create_entry_fn(tcx, module, main_def_id, is_jit, sigpipe);
+    create_entry_fn(tcx, module, main_def_id, is_jit, sigpipe, refs);
 
     fn create_entry_fn(
         tcx: TyCtxt<'_>,
@@ -41,6 +42,7 @@ pub(crate) fn maybe_create_entry_wrapper(
         rust_main_def_id: DefId,
         ignore_lang_start_wrapper: bool,
         sigpipe: u8,
+        refs: &mut Vec<FuncId>,
     ) {
         let main_ret_ty = tcx.fn_sig(rust_main_def_id).no_bound_vars().unwrap().output();
         // Given that `main()` has no arguments,
@@ -80,6 +82,7 @@ pub(crate) fn maybe_create_entry_wrapper(
         let main_name = tcx.symbol_name(instance).name;
         let main_sig = get_function_sig(tcx, m.target_config().default_call_conv, instance);
         let main_func_id = m.declare_function(main_name, Linkage::Import, &main_sig).unwrap();
+        refs.push(main_func_id);
 
         let mut ctx = Context::new();
         ctx.func.signature = cmain_sig;
@@ -123,6 +126,7 @@ pub(crate) fn maybe_create_entry_wrapper(
                 let report_sig = get_function_sig(tcx, m.target_config().default_call_conv, report);
                 let report_func_id =
                     m.declare_function(report_name, Linkage::Import, &report_sig).unwrap();
+                refs.push(report_func_id);
                 let report_func_ref = m.declare_func_in_func(report_func_id, bcx.func);
 
                 // FIXME do proper abi handling instead of expecting the pass mode to be identical
@@ -145,6 +149,7 @@ pub(crate) fn maybe_create_entry_wrapper(
                     DUMMY_SP,
                 );
                 let start_func_id = import_function(tcx, m, start_instance);
+                refs.push(start_func_id);
 
                 let main_val = bcx.ins().func_addr(m.target_config().pointer_type(), main_func_ref);
 

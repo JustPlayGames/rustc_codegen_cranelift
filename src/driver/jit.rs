@@ -92,7 +92,7 @@ pub(crate) fn run_jit(tcx: TyCtxt<'_>, target_cpu: String, jit_args: Vec<String>
         }
     });
 
-    crate::main_shim::maybe_create_entry_wrapper(tcx, &mut jit_module, true, true);
+    crate::main_shim::maybe_create_entry_wrapper(tcx, &mut jit_module, true, true, &mut vec![]);
 
     tcx.dcx().abort_if_errors();
 

@@ -40,6 +40,8 @@ pub(crate) struct AotModule {
     codegened_functions: Vec<CodegenedFunction>,
     global_asm: String,
     inline_mode: crate::inline::InlineMode,
+    /// The functions that data objects and the entry wrapper of this codegen unit refer to.
+    outside_func_refs: rustc_data_structures::fx::FxHashSet<FuncId>,
 }
 
 fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
@@ -90,6 +92,7 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
         codegened_functions,
         global_asm,
         inline_mode,
+        outside_func_refs: Default::default(),
     }
 }
 
@@ -219,7 +222,16 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
             }
         }
     }
-    crate::main_shim::maybe_create_entry_wrapper(tcx, &mut module.module, false, cgu.is_primary());
+    let mut entry_refs = vec![];
+    crate::main_shim::maybe_create_entry_wrapper(
+        tcx,
+        &mut module.module,
+        false,
+        cgu.is_primary(),
+        &mut entry_refs,
+    );
+    module.outside_func_refs = std::mem::take(&mut constants_cx.data_func_refs);
+    module.outside_func_refs.extend(entry_refs);
 
     module
 }
@@ -238,7 +250,7 @@ fn compile_cgu(
             prof.clone(),
         )));
 
-        prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
+        let changed = prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
             crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)
         });
 
@@ -247,6 +259,30 @@ fn compile_cgu(
                 crate::optimize::pow2_test::rewrite_popcount_tests(&mut codegened_func.func);
             }
         });
+
+        // `#[inline(always)]` functions inlined everywhere are left out: a trap stands in for
+        // their body, as their local symbol is declared already. Not with debuginfo (it
+        // describes every function's code), nor when assembly may name a function.
+        let trap: &[u8] = match aot_module.module.isa().triple().architecture {
+            target_lexicon::Architecture::X86_64 => &[0x0f, 0x0b], // ud2
+            target_lexicon::Architecture::Aarch64(_) => &[0, 0, 0, 0], // udf #0
+            _ => &[],
+        };
+        let unreferenced = if trap.is_empty()
+            || aot_module.debug_context.is_some()
+            || !aot_module.global_asm.is_empty()
+            || aot_module.codegened_functions.iter().any(|f| f.inline_hints.has_inline_asm)
+        {
+            vec![]
+        } else {
+            let declarations = aot_module.module.declarations();
+            crate::inline::unreferenced_inlined(
+                &aot_module.codegened_functions,
+                &changed,
+                &aot_module.outside_func_refs,
+                |id| declarations.get_function_decl(id).linkage == Linkage::Local,
+            )
+        };
 
         if crate::mem_libcalls::enabled(aot_module.module.isa()) {
             prof.generic_activity_with_arg("inline small memcpys", &*cgu_name).run(|| {
@@ -257,7 +293,14 @@ fn compile_cgu(
         }
 
         let mut cached_context = Context::new();
-        for codegened_func in aot_module.codegened_functions {
+        for (i, codegened_func) in aot_module.codegened_functions.into_iter().enumerate() {
+            if unreferenced.get(i).copied().unwrap_or(false) {
+                aot_module
+                    .module
+                    .define_function_bytes(codegened_func.func_id, 1, trap, &[])
+                    .unwrap();
+                continue;
+            }
             crate::base::compile_fn(
                 &prof,
                 dcx,
