@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -293,8 +293,219 @@ fn compile_cgu(
     })
 }
 
-#[derive(Copy, Clone)]
-pub(crate) struct AotDriver;
+#[derive(Clone, Default)]
+pub(crate) struct AotDriver {
+    /// Set with `-Zthreads` > 1: codegen units translated ahead of rustc_codegen_ssa's loop.
+    pub(crate) prefetch: Option<Arc<Prefetch>>,
+}
+
+/// Translates codegen units (MIR to CLIF) on rustc's other threads while rustc_codegen_ssa's
+/// loop asks for them one by one on the main thread: that loop translates only its first
+/// `-Zthreads` units in parallel and the rest serially, while Cranelift compiles them on the
+/// worker threads. The runner starts once rustc_codegen_ssa asked for its first unit (it has
+/// then decided which units to reuse: the ones it marked green), queues one job per unit in the
+/// order the loop asks for them, at most `threads` at a time, and keeps at most `ahead` units
+/// translated that the loop hasn't taken yet.
+///
+/// Nothing here waits for a job that hasn't started: a unit asked for while its job is still
+/// queued is taken back and translated by the caller, and a running job never waits for the
+/// main thread. So a thread that runs a job while it waits for other work (rayon steals) can't
+/// deadlock, whichever thread it is.
+#[derive(Default)]
+pub(crate) struct Prefetch {
+    state: Mutex<PrefetchState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct PrefetchState {
+    /// rustc_codegen_ssa asked for its first codegen unit.
+    started: bool,
+    /// rustc_codegen_ssa is done asking (or gave up).
+    finished: bool,
+    units: FxHashMap<Symbol, Unit>,
+    /// Units queued or translating.
+    in_flight: usize,
+    /// Units translated that nobody took yet.
+    ready: usize,
+}
+
+enum Unit {
+    Queued,
+    Translating,
+    Ready(rustc_data_structures::sync::IntoDynSyncSend<(ModuleCodegen<AotModule>, u64)>),
+    Taken,
+}
+
+/// Marks the prefetch finished when rustc_codegen_ssa returns or unwinds, so the runner stops.
+pub(crate) struct FinishPrefetch<'a>(pub(crate) &'a Prefetch);
+
+impl Drop for FinishPrefetch<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.finished = true;
+        self.0.changed.notify_all();
+    }
+}
+
+impl Prefetch {
+    /// Queues the units' jobs until every unit is queued or taken, or rustc_codegen_ssa is done.
+    pub(crate) fn run(&self, tcx: TyCtxt<'_>, threads: usize) {
+        {
+            let mut state = self.state.lock().unwrap();
+            while !state.started && !state.finished {
+                state = self.changed.wait(state).unwrap();
+            }
+            if state.finished {
+                return;
+            }
+        }
+
+        // The order of rustc_codegen_ssa's loop: largest and smallest first, then the second
+        // largest and smallest, ... Units it reuses are green.
+        let mut units =
+            tcx.collect_and_partition_mono_items(()).codegen_units.iter().collect::<Vec<_>>();
+        units.sort_by_key(|cgu| std::cmp::Reverse(cgu.size_estimate()));
+        let (first_half, second_half) = units.split_at(units.len() / 2);
+        let mut ordered = Vec::with_capacity(units.len());
+        let mut second = second_half.iter().rev();
+        for cgu in first_half {
+            ordered.push(*cgu);
+            if let Some(cgu) = second.next() {
+                ordered.push(*cgu);
+            }
+        }
+        ordered.extend(second);
+        let units = ordered
+            .into_iter()
+            .filter(|cgu| {
+                !tcx.dep_graph.is_fully_enabled()
+                    || !tcx.dep_graph.is_green(&cgu.codegen_dep_node(tcx))
+            })
+            .map(|cgu| cgu.name())
+            .collect::<Vec<_>>();
+
+        let ahead = threads * 2;
+        // Only runs with `-Zthreads` > 1, when rustc's types may cross threads.
+        let proof = rustc_data_structures::sync::check_dyn_thread_safe()
+            .expect("prefetch without parallel rustc");
+        let data = proof.derive((self, tcx, units));
+        rustc_thread_pool::scope(move |scope| {
+            let (this, tcx, units) = data.into_inner();
+            this.queue(tcx, units, threads, ahead, scope, proof);
+        });
+    }
+
+    fn queue<'scope, 'tcx: 'scope>(
+        &'scope self,
+        tcx: TyCtxt<'tcx>,
+        units: Vec<Symbol>,
+        threads: usize,
+        ahead: usize,
+        scope: &rustc_thread_pool::Scope<'scope>,
+        proof: rustc_data_structures::sync::FromDyn<()>,
+    ) {
+        for cgu_name in units {
+            {
+                let mut state = self.state.lock().unwrap();
+                while (state.in_flight >= threads || state.ready >= ahead) && !state.finished {
+                    state = self.changed.wait(state).unwrap();
+                }
+                if state.finished {
+                    return;
+                }
+                if state.units.contains_key(&cgu_name) {
+                    continue;
+                }
+                state.units.insert(cgu_name, Unit::Queued);
+                state.in_flight += 1;
+            }
+            let job = proof.derive((self, tcx));
+            scope.spawn(move |_| {
+                let (this, tcx) = job.into_inner();
+                this.translate(tcx, cgu_name)
+            });
+        }
+    }
+
+    fn translate(&self, tcx: TyCtxt<'_>, cgu_name: Symbol) {
+        {
+            let mut state = self.state.lock().unwrap();
+            match state.units.get(&cgu_name) {
+                Some(Unit::Queued) if !state.finished => {
+                    state.units.insert(cgu_name, Unit::Translating);
+                }
+                // Taken back by the loop, or nobody needs it any more.
+                _ => return,
+            }
+        }
+        let unit = compile_codegen_unit(tcx, cgu_name);
+        let mut state = self.state.lock().unwrap();
+        state
+            .units
+            .insert(cgu_name, Unit::Ready(rustc_data_structures::sync::IntoDynSyncSend(unit)));
+        state.in_flight -= 1;
+        state.ready += 1;
+        self.changed.notify_all();
+    }
+
+    /// The unit if a job translated it or is translating it; `None` if the caller should.
+    fn take(&self, cgu_name: Symbol) -> Option<(ModuleCodegen<AotModule>, u64)> {
+        let mut state = self.state.lock().unwrap();
+        if !state.started {
+            state.started = true;
+            self.changed.notify_all();
+        }
+        loop {
+            match state.units.get(&cgu_name) {
+                None => {
+                    state.units.insert(cgu_name, Unit::Taken);
+                    return None;
+                }
+                Some(Unit::Queued) => {
+                    // Its job hasn't started: don't wait for a thread to pick it up.
+                    state.units.insert(cgu_name, Unit::Taken);
+                    state.in_flight -= 1;
+                    self.changed.notify_all();
+                    return None;
+                }
+                Some(Unit::Translating) => state = self.changed.wait(state).unwrap(),
+                Some(Unit::Ready(_)) => {
+                    let Some(Unit::Ready(unit)) = state.units.insert(cgu_name, Unit::Taken) else {
+                        unreachable!()
+                    };
+                    state.ready -= 1;
+                    self.changed.notify_all();
+                    return Some(unit.0);
+                }
+                Some(Unit::Taken) => unreachable!("codegen unit {cgu_name} asked for twice"),
+            }
+        }
+    }
+}
+
+fn compile_codegen_unit(tcx: TyCtxt<'_>, cgu_name: Symbol) -> (ModuleCodegen<AotModule>, u64) {
+    let start_time = Instant::now();
+
+    let dep_node = tcx.codegen_unit(cgu_name).codegen_dep_node(tcx);
+    let (module, _) = tcx.dep_graph.with_task(
+        dep_node,
+        tcx,
+        || {
+            let aot_module = codegen_cgu(tcx, cgu_name);
+            ModuleCodegen::new_regular(cgu_name.as_str().to_owned(), aot_module)
+        },
+        Some(rustc_middle::dep_graph::hash_result),
+    );
+
+    let time_to_codegen = start_time.elapsed();
+
+    // We assume that the cost to run LLVM on a CGU is proportional to
+    // the time we needed for codegenning it.
+    let cost = time_to_codegen.as_nanos() as u64;
+
+    (module, cost)
+}
 
 impl ExtraBackendMethods for AotDriver {
     type Module = AotModule;
@@ -316,26 +527,10 @@ impl ExtraBackendMethods for AotDriver {
         cgu_name: Symbol,
         _bitcode_needed: bool,
     ) -> (ModuleCodegen<Self::Module>, u64) {
-        let start_time = Instant::now();
-
-        let dep_node = tcx.codegen_unit(cgu_name).codegen_dep_node(tcx);
-        let (module, _) = tcx.dep_graph.with_task(
-            dep_node,
-            tcx,
-            || {
-                let aot_module = codegen_cgu(tcx, cgu_name);
-                ModuleCodegen::new_regular(cgu_name.as_str().to_owned(), aot_module)
-            },
-            Some(rustc_middle::dep_graph::hash_result),
-        );
-
-        let time_to_codegen = start_time.elapsed();
-
-        // We assume that the cost to run LLVM on a CGU is proportional to
-        // the time we needed for codegenning it.
-        let cost = time_to_codegen.as_nanos() as u64;
-
-        (module, cost)
+        if let Some(unit) = self.prefetch.as_ref().and_then(|prefetch| prefetch.take(cgu_name)) {
+            return unit;
+        }
+        compile_codegen_unit(tcx, cgu_name)
     }
 }
 
