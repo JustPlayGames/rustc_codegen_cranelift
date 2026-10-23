@@ -42,7 +42,7 @@ pub(crate) fn codegen_fn<'tcx>(
     type_dbg: &mut TypeDebugContext<'tcx>,
     cached_func: Function,
     module: &mut dyn Module,
-    constants_cx: &mut ConstantCx,
+    constants_cx: &mut ConstantCx<'tcx>,
     instance: Instance<'tcx>,
 ) -> CodegenedFunction {
     debug_assert!(!instance.args.has_infer());
@@ -119,6 +119,7 @@ pub(crate) fn codegen_fn<'tcx>(
         caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot,
         landing_pads: Default::default(),
+        func_refs: Default::default(),
 
         clif_comments,
         inline_asm: String::new(),

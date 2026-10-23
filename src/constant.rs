@@ -16,9 +16,9 @@ use crate::prelude::*;
 
 /// The allocations of a codegen unit: one data object per allocation for all of its functions
 /// and statics, as LLVM has one global per allocation and codegen unit. (One per function made
-/// half of a crate's data objects duplicates.)
+/// half of a crate's data objects duplicates.) Also the functions the unit calls.
 #[derive(Default)]
-pub(crate) struct ConstantCx {
+pub(crate) struct ConstantCx<'tcx> {
     todo: Vec<TodoItem>,
     anon_allocs: FxHashMap<AllocId, DataId>,
     /// Immutable allocations by their interned contents (the address of their `Allocation`):
@@ -26,6 +26,9 @@ pub(crate) struct ConstantCx {
     /// constants. Different `AllocId`s often have the same contents (a string literal or
     /// constant used in several places).
     alloc_contents: FxHashMap<usize, DataId>,
+    /// The functions called in this codegen unit, declared at their first call: a declaration
+    /// costs the symbol name, the signature and a lookup by name in the module.
+    pub(crate) function_ids: FxHashMap<Instance<'tcx>, FuncId>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -34,13 +37,9 @@ enum TodoItem {
     Static(DefId),
 }
 
-impl ConstantCx {
+impl ConstantCx<'_> {
     pub(crate) fn new() -> Self {
-        ConstantCx {
-            todo: vec![],
-            anon_allocs: FxHashMap::default(),
-            alloc_contents: FxHashMap::default(),
-        }
+        Self::default()
     }
 
     /// Defines the allocations used since the last call.
@@ -52,7 +51,7 @@ impl ConstantCx {
 pub(crate) fn codegen_static(
     tcx: TyCtxt<'_>,
     module: &mut dyn Module,
-    constants_cx: &mut ConstantCx,
+    constants_cx: &mut ConstantCx<'_>,
     def_id: DefId,
 ) -> DataId {
     constants_cx.todo.push(TodoItem::Static(def_id));
@@ -276,7 +275,7 @@ fn pointer_for_allocation<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, alloc_id: All
 
 pub(crate) fn data_id_for_alloc_id(
     tcx: TyCtxt<'_>,
-    cx: &mut ConstantCx,
+    cx: &mut ConstantCx<'_>,
     module: &mut dyn Module,
     alloc_id: AllocId,
     mutability: rustc_hir::Mutability,
@@ -308,7 +307,7 @@ pub(crate) fn data_id_for_alloc_id(
 
 pub(crate) fn data_id_for_vtable<'tcx>(
     tcx: TyCtxt<'tcx>,
-    cx: &mut ConstantCx,
+    cx: &mut ConstantCx<'_>,
     module: &mut dyn Module,
     ty: Ty<'tcx>,
     trait_ref: Option<ExistentialTraitRef<'tcx>>,
@@ -419,7 +418,7 @@ fn data_id_for_static(
     }
 }
 
-fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut ConstantCx) {
+fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut ConstantCx<'_>) {
     let mut done = FxHashSet::default();
     while let Some(todo_item) = cx.todo.pop() {
         if !done.insert(todo_item) {

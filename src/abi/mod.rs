@@ -28,8 +28,8 @@ use smallvec::{SmallVec, smallvec};
 use self::pass_mode::*;
 pub(crate) use self::returning::codegen_return;
 use crate::base::codegen_unwind_terminate;
-use crate::debuginfo::{EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE};
 use crate::common::LandingPad;
+use crate::debuginfo::{EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE};
 use crate::prelude::*;
 
 struct ArgValue<'tcx> {
@@ -134,9 +134,27 @@ pub(crate) fn import_function<'tcx>(
 }
 
 impl<'tcx> FunctionCx<'_, '_, 'tcx> {
-    /// Instance must be monomorphized
+    /// The function's reference in this function, imported at its first call. Instance must be
+    /// monomorphized.
     pub(crate) fn get_function_ref(&mut self, inst: Instance<'tcx>) -> FuncRef {
-        let func_id = import_function(self.tcx, self.module, inst);
+        if let Some(&func_ref) = self.func_refs.get(&inst) {
+            return func_ref;
+        }
+        let func_ref = self.import_function_ref(inst);
+        self.func_refs.insert(inst, func_ref);
+        func_ref
+    }
+
+    /// A reference of its own, for a call that changes its signature (a C-variadic call).
+    pub(crate) fn import_function_ref(&mut self, inst: Instance<'tcx>) -> FuncRef {
+        let func_id = match self.constants_cx.function_ids.get(&inst) {
+            Some(&func_id) => func_id,
+            None => {
+                let func_id = import_function(self.tcx, self.module, inst);
+                self.constants_cx.function_ids.insert(inst, func_id);
+                func_id
+            }
+        };
         let func_ref = self.module.declare_func_in_func(func_id, self.bcx.func);
 
         if self.clif_comments.enabled() {
@@ -616,7 +634,12 @@ pub(crate) fn codegen_terminator_call<'tcx>(
 
         // Normal call
         Some(instance) => {
-            let func_ref = fx.get_function_ref(instance);
+            // A C-variadic call changes its signature to the arguments it passes.
+            let func_ref = if fn_abi.c_variadic {
+                fx.import_function_ref(instance)
+            } else {
+                fx.get_function_ref(instance)
+            };
             (CallTarget::Direct(func_ref), None)
         }
 
@@ -977,7 +1000,10 @@ pub(crate) fn codegen_call_with_unwind_action(
             let exception_table = fx.bcx.func.dfg.exception_tables.push(ExceptionTableData::new(
                 sig_ref,
                 fallthrough_block_call,
-                [ExceptionTableItem::Tag(ExceptionTag::with_number(tag).unwrap(), landing_pad_call)],
+                [ExceptionTableItem::Tag(
+                    ExceptionTag::with_number(tag).unwrap(),
+                    landing_pad_call,
+                )],
             ));
 
             match func_ref {
