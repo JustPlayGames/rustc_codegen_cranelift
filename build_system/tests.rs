@@ -129,6 +129,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.volatile_mmio", &|runner| {
+        // Volatile accesses keep their count, width and order at every opt-level.
+        for opt in ["0", "1", "2", "3"] {
+            let name = format!("volatile_mmio{opt}");
+            runner.run_rustc([
+                "example/volatile_mmio.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.ssa_adts", &|runner| {
         // Small ADT locals live in variables at every opt level.
         runner.run_rustc(["example/ssa_adts.rs", "-Copt-level=0", "--crate-name", "ssa_adts0"]);
