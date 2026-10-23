@@ -492,6 +492,17 @@ impl<'tcx> CPlace<'tcx> {
         }
     }
 
+    /// The stack slot and offset this place lives at, if it is a sized place in a stack slot.
+    pub(crate) fn debug_stack_location(self) -> Option<(StackSlot, i32)> {
+        match self.inner {
+            CPlaceInner::Addr(ptr, None) => match ptr.debug_base_and_offset() {
+                (crate::pointer::PointerBase::Stack(slot), offset) => Some((slot, offset.into())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub(crate) fn try_to_ptr(self) -> Option<Pointer> {
         match self.inner {
             CPlaceInner::Var(_, _) | CPlaceInner::VarPair(_, _, _) => None,

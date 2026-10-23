@@ -345,12 +345,15 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
 
     self::comments::add_locals_header_comment(fx);
 
+    let debug_vars = crate::analyze::debug_variable_locals(fx);
     for (local, arg_kind, ty) in func_params {
         // While this is normally an optimization to prevent an unnecessary copy when an argument is
         // not mutated by the current function, this is necessary to support unsized arguments.
+        // Arguments the debugger shows get a stack slot of their own (`debug_variable_locals`).
         if let ArgKind::Normal(Some(ArgValue { value: val, is_underaligned_pointee: false })) =
             arg_kind
             && let Some((addr, meta)) = val.try_to_ptr()
+            && (meta.is_some() || !debug_vars.as_ref().is_some_and(|vars| vars.contains(local)))
         {
             // Ownership of the value at the backing storage for an argument is passed to the
             // callee per the ABI, so it is fine to borrow the backing storage of this argument

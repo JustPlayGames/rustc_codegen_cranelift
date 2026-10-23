@@ -1,12 +1,14 @@
 //! Handling of everything related to debuginfo.
 
 mod codeview;
+mod codeview_types;
 mod emit;
 mod gcc_except_table;
 mod line_info;
 mod object;
 mod types;
 mod unwind;
+mod variables;
 
 use cranelift_codegen::ir::Endianness;
 use cranelift_codegen::isa::TargetIsa;
@@ -32,6 +34,7 @@ pub(crate) use self::unwind::{
     EXCEPTION_HANDLER_CATCH, EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE, SEH_FREE,
     SEH_PERSONALITY, SEH_RESUME, UnwindContext, uses_seh_runtime,
 };
+pub(crate) use self::variables::define_variables;
 use crate::debuginfo::emit::{address_for_data, address_for_func};
 use crate::prelude::*;
 
@@ -58,8 +61,12 @@ pub(crate) struct DebugContext {
 pub(crate) struct FunctionDebugContext {
     entry_id: Option<UnitEntryId>,
     function_source_loc: (FileId, u64, u64),
-    source_loc_set: IndexSet<(FileId, u64, u64)>,
+    /// File, line, column and MIR scope of each Cranelift `SourceLoc`.
+    source_loc_set: IndexSet<(FileId, u64, u64, u32)>,
+    /// The parent of each MIR scope (for the lexical blocks of variables).
+    scope_parents: Vec<Option<u32>>,
     cv_info: Option<codeview::CvFunctionInfo>,
+    variables: Vec<variables::DebugVariable>,
 }
 
 impl DebugContext {
@@ -257,9 +264,11 @@ impl DebugContext {
                 entry_id: None,
                 function_source_loc: (file_id, line, column),
                 source_loc_set: IndexSet::new(),
+                scope_parents: Vec::new(),
                 cv_info: Some(codeview::CvFunctionInfo {
                     name: codeview_function_name(tcx, instance),
                 }),
+                variables: Vec::new(),
             };
         }
 
@@ -268,7 +277,9 @@ impl DebugContext {
                 entry_id: None,
                 function_source_loc: (file_id, line, column),
                 source_loc_set: IndexSet::new(),
+                scope_parents: Vec::new(),
                 cv_info: None,
+                variables: Vec::new(),
             };
         }
 
@@ -335,7 +346,9 @@ impl DebugContext {
             entry_id: Some(entry_id),
             function_source_loc: (file_id, line, column),
             source_loc_set: IndexSet::new(),
+            scope_parents: Vec::new(),
             cv_info: None,
+            variables: Vec::new(),
         }
     }
 
@@ -435,6 +448,9 @@ impl FunctionDebugContext {
                 context,
                 &self.source_loc_set,
                 self.function_source_loc,
+                &self.variables,
+                &self.scope_parents,
+                &self.scope_ranges(context),
             );
             return;
         }
@@ -452,6 +468,8 @@ impl FunctionDebugContext {
             entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(address_for_func(func_id)));
             // Using Udata for DW_AT_high_pc requires at least DWARF4
             entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(u64::from(end)));
+
+            debug_context.define_dwarf_variables(entry_id, func_id, &self, context);
         }
     }
 }
