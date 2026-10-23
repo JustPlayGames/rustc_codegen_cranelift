@@ -211,6 +211,27 @@ pub(crate) fn codegen_checked_int_binop<'tcx>(
 
     let signed = type_sign(in_lhs.layout().ty);
 
+    // x86_64: Cranelift's `*_overflow` instructions. An `assert` on the flag then branches on the flags of the
+    // `add`/`sub`/`mul` itself (`add; jb`, `mul; jo`) instead of comparing the result again (`lea; cmp; jb`), and a
+    // checked multiply needs no second high-half multiply.
+    if fx.tcx.sess.target.arch == rustc_target::spec::Arch::X86_64 {
+        let ty = fx.bcx.func.dfg.value_type(lhs);
+        let ovf = match (bin_op, signed) {
+            (BinOp::Add, false) => Some(fx.bcx.ins().uadd_overflow(lhs, rhs)),
+            (BinOp::Add, true) => Some(fx.bcx.ins().sadd_overflow(lhs, rhs)),
+            (BinOp::Sub, false) => Some(fx.bcx.ins().usub_overflow(lhs, rhs)),
+            (BinOp::Sub, true) => Some(fx.bcx.ins().ssub_overflow(lhs, rhs)),
+            (BinOp::Mul, _) if ty != types::I128 => {
+                Some(if signed { fx.bcx.ins().smul_overflow(lhs, rhs) } else { fx.bcx.ins().umul_overflow(lhs, rhs) })
+            }
+            _ => None,
+        };
+        if let Some((res, has_overflow)) = ovf {
+            let out_layout = fx.layout_of(Ty::new_tup(fx.tcx, &[in_lhs.layout().ty, fx.tcx.types.bool]));
+            return CValue::by_val_pair(res, has_overflow, out_layout);
+        }
+    }
+
     let (res, has_overflow) = match bin_op {
         BinOp::Add => {
             /*let (val, c_out) = fx.bcx.ins().iadd_cout(lhs, rhs);
