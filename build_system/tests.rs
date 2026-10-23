@@ -292,6 +292,28 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.jump_thunks", &|runner| {
+        // Functions that only forward to another one are a jump to it without debuginfo:
+        // register, stack and sret arguments, fn pointers, vtables and unwinding keep working,
+        // and a nounwind forwarder keeps its frame and aborts; both ways of emitting those.
+        if !runner.panic_unwind_support {
+            return;
+        }
+        for (opt, debuginfo, mode) in
+            [("0", "0", "calls"), ("2", "0", "calls"), ("0", "0", "pads"), ("0", "2", "calls")]
+        {
+            let name = format!("jump_thunks{opt}{debuginfo}{mode}");
+            runner.run_rustc([
+                "example/jump_thunks.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cdebuginfo={debuginfo}"),
+                &format!("-Cllvm-args=clif-terminate={mode}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, if debuginfo == "0" { &["thunks"] } else { &[] });
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
