@@ -24,6 +24,7 @@
 
 use std::borrow::Cow;
 
+use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::inline::{Inline, InlineCommand};
 use cranelift_codegen::ir::{self, InstructionData, Opcode};
 use rustc_data_structures::fx::FxHashMap;
@@ -121,9 +122,6 @@ struct Candidate {
     stack: u32,
     hints: InlineHints,
     frame_dependent: bool,
-    /// Has calls that must abort when they unwind (tagged plain calls, see
-    /// `common::terminate_calls`).
-    terminate_calls: bool,
 }
 
 fn callee_func_id(caller: &ir::Function, func_ref: ir::FuncRef) -> Option<FuncId> {
@@ -198,7 +196,7 @@ impl Inline for Inliner<'_> {
         &mut self,
         caller: &ir::Function,
         call_inst: ir::Inst,
-        call_opcode: ir::Opcode,
+        _call_opcode: ir::Opcode,
         callee: ir::FuncRef,
         _call_args: &[ir::Value],
     ) -> InlineCommand<'_> {
@@ -207,13 +205,11 @@ impl Inline for Inliner<'_> {
         if !self.wants(caller, idx) {
             return InlineCommand::KeepCall;
         }
-        // Calls that must abort when they unwind are plain calls with a tag, which inlining
-        // would lose: at such a call site the callee's own calls would be listed as calls that
-        // unwind, and at a `try_call` site the inliner turns the callee's tagged calls into
-        // `try_call`s to the caller's landing pad.
-        if caller.debug_tags.has(call_inst)
-            || (call_opcode == Opcode::TryCall && self.candidates[idx].terminate_calls)
-        {
+        // Calls that must abort when they unwind are plain calls with a tag: at such a call
+        // site the callee's own calls would be listed as calls that unwind. (At a `try_call`
+        // site the inliner turns the callee's tagged calls into `try_call`s to the caller's
+        // landing pad; `untry_terminate_calls` makes them plain calls again.)
+        if caller.debug_tags.has(call_inst) {
             return InlineCommand::KeepCall;
         }
         let body = &self.funcs[idx].func;
@@ -252,7 +248,6 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
                     stack: 0,
                     hints: f.inline_hints,
                     frame_dependent: false,
-                    terminate_calls: false,
                 };
             }
             Candidate {
@@ -260,7 +255,6 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
                 stack: stack_bytes(&f.func),
                 hints: f.inline_hints,
                 frame_dependent: has_frame_dependent_code(&f.func),
-                terminate_calls: !f.func.debug_tags.is_empty(),
             }
         })
         .collect();
@@ -330,16 +324,64 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
             if let Err(err) = res {
                 panic!("inlining into {} failed: {err:?}", funcs[idx].symbol_name);
             }
+            if inlined > 0 {
+                untry_terminate_calls(&mut ctx.func);
+            }
             share_inlined_slots(&mut ctx.func, &groups);
             funcs[idx].func = std::mem::replace(&mut ctx.func, ir::Function::new());
             if inlined > 0 {
                 candidates[idx].size = inst_count(&funcs[idx].func);
                 candidates[idx].stack = stack_bytes(&funcs[idx].func);
                 candidates[idx].frame_dependent = has_frame_dependent_code(&funcs[idx].func);
-                candidates[idx].terminate_calls = !funcs[idx].func.debug_tags.is_empty();
             }
         }
         done[idx] = true;
+    }
+}
+
+/// Makes the tagged calls that the inliner turned into `try_call`s (callees inlined at a
+/// `try_call` site get the caller's landing pads for their calls) plain calls again: they must
+/// abort when they unwind, not land in the caller's cleanup. The block the inliner split off
+/// after the call stays, entered with a jump.
+fn untry_terminate_calls(func: &mut ir::Function) {
+    if func.debug_tags.is_empty() {
+        return;
+    }
+    let mut calls = vec![];
+    for block in func.layout.blocks() {
+        if let Some(inst) = func.layout.last_inst(block)
+            && matches!(func.dfg.insts[inst].opcode(), Opcode::TryCall | Opcode::TryCallIndirect)
+            && func.debug_tags.has(inst)
+        {
+            calls.push(inst);
+        }
+    }
+    for inst in calls {
+        let (call, exception) = match func.dfg.insts[inst] {
+            InstructionData::TryCall { args, func_ref, exception, .. } => {
+                (InstructionData::Call { opcode: Opcode::Call, args, func_ref }, exception)
+            }
+            InstructionData::TryCallIndirect { args, exception, .. } => {
+                let sig_ref = func.dfg.exception_tables[exception].signature();
+                (InstructionData::CallIndirect { opcode: Opcode::CallIndirect, args, sig_ref }, exception)
+            }
+            _ => unreachable!(),
+        };
+        let normal = *func.dfg.exception_tables[exception].normal_return();
+        func.dfg.insts[inst] = call;
+        func.dfg.make_inst_results(inst, ir::types::INVALID);
+        let results = func.dfg.inst_results(inst).to_vec();
+        let target = normal.block(&func.dfg.value_lists);
+        let args: Vec<ir::BlockArg> = normal
+            .args(&func.dfg.value_lists)
+            .map(|arg| match arg {
+                ir::BlockArg::TryCallRet(i) => ir::BlockArg::Value(results[i as usize]),
+                ir::BlockArg::Value(value) => ir::BlockArg::Value(value),
+                ir::BlockArg::TryCallExn(_) => unreachable!("normal return with an exception"),
+            })
+            .collect();
+        let mut pos = FuncCursor::new(func).after_inst(inst);
+        pos.ins().jump(target, &args);
     }
 }
 
