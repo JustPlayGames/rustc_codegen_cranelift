@@ -106,8 +106,8 @@ impl<T: Module> Module for UnwindModule<T> {
         Ok(())
     }
 
-    /// Code without unwind information (it never unwinds: a trap standing in for a function no
-    /// one calls).
+    /// Code without a frame of its own: a jump to another function (`create_wrapper_function`)
+    /// or the trap standing in for a function no one calls.
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
@@ -115,10 +115,14 @@ impl<T: Module> Module for UnwindModule<T> {
         bytes: &[u8],
         relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        // Only for code that needs no unwind info: a jump to another function (see
-        // `create_wrapper_function`) or the trap standing in for a function that inlining left
-        // unreferenced, neither of which has a frame of its own.
-        self.module.define_function_bytes(func_id, alignment, bytes, relocs)
+        self.module.define_function_bytes(func_id, alignment, bytes, relocs)?;
+        // A jump (it has the callee's relocation) gets an FDE without instructions on ELF, as
+        // `define_frameless_function` gives one, so a profiler's sample at the jump (the allocator
+        // shims run on every allocation) unwinds. A trap never unwinds and gets none.
+        if !relocs.is_empty() {
+            self.unwind_context.add_frameless_function(&self.module, func_id, bytes.len() as u32);
+        }
+        Ok(())
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {

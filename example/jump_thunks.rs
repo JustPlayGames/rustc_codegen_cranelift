@@ -3,8 +3,11 @@
 // returned through a pointer (sret), a struct passed by pointer, calls through fn pointers and
 // vtables, a panic unwinding through a forwarder, and a nounwind forwarder, which must keep its
 // frame and abort. With the argument `thunks`, the forwarders must start with a `jmp` (x86_64)
-// and have unwind info for a profiler's samples at it (Linux).
+// and have unwind info for a profiler's samples at it (Linux), as must the allocator shim, a
+// `jmp` to the default allocator (`create_wrapper_function`).
 // Each aborting case runs in a child process (this program again).
+#![feature(rustc_attrs)]
+
 use std::hint::black_box;
 use std::panic::catch_unwind;
 use std::process::Command;
@@ -146,6 +149,11 @@ fn aborted(status: std::process::ExitStatus) -> bool {
     }
 }
 
+unsafe extern "Rust" {
+    #[rustc_std_internal_symbol]
+    fn __rust_alloc(size: usize, align: usize) -> *mut u8;
+}
+
 fn starts_with_jmp(f: *const ()) -> bool {
     unsafe { *(f as *const u8) == 0xe9 }
 }
@@ -215,7 +223,8 @@ fn main() {
     );
 
     if arg.as_deref() == Some("thunks") && cfg!(target_arch = "x86_64") {
-        let forwarders: [(&str, *const (), bool); 8] = [
+        let forwarders: [(&str, *const (), bool); 9] = [
+            ("__rust_alloc", __rust_alloc as *const (), true),
             ("fwd_add", fwd_add as *const (), true),
             ("fwd_many", fwd_many as *const (), true),
             ("fwd_big", fwd_big as *const (), true),
