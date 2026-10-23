@@ -52,6 +52,8 @@ pub(crate) struct InlineHints {
     pub(crate) never: bool,
     pub(crate) cold: bool,
     pub(crate) has_inline_asm: bool,
+    /// An `asm!` names a function with a `sym` operand.
+    pub(crate) inline_asm_names_fn: bool,
 }
 
 pub(crate) fn inline_mode(sess: &rustc_session::Session) -> InlineMode {

@@ -260,7 +260,8 @@ fn compile_cgu(
 
         // `#[inline(always)]` functions inlined everywhere are left out: a trap stands in for
         // their body, as their local symbol is declared already. Not with debuginfo (it
-        // describes every function's code), nor when assembly may name a function.
+        // describes every function's code), nor when assembly may name a function: global
+        // assembly, or an `asm!` with a `sym` operand (other `asm!` refers to no function).
         let trap: &[u8] = match aot_module.module.isa().triple().architecture {
             target_lexicon::Architecture::X86_64 => &[0x0f, 0x0b], // ud2
             target_lexicon::Architecture::Aarch64(_) => &[0, 0, 0, 0], // udf #0
@@ -269,7 +270,7 @@ fn compile_cgu(
         let unreferenced = if trap.is_empty()
             || aot_module.debug_context.is_some()
             || !aot_module.global_asm.is_empty()
-            || aot_module.codegened_functions.iter().any(|f| f.inline_hints.has_inline_asm)
+            || aot_module.codegened_functions.iter().any(|f| f.inline_hints.inline_asm_names_fn)
         {
             vec![]
         } else {

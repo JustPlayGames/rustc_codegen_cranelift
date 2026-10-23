@@ -134,6 +134,7 @@ pub(crate) fn codegen_fn<'tcx>(
         clif_comments,
         inline_asm: String::new(),
         inline_asm_index: 0,
+        inline_asm_names_fn: false,
     };
 
     tcx.prof.generic_activity("codegen clif ir").run(|| codegen_fn_body(&mut fx, start_block));
@@ -148,6 +149,7 @@ pub(crate) fn codegen_fn<'tcx>(
     let clif_comments = fx.clif_comments;
     let func_debug_cx = fx.func_debug_cx;
     let inline_asm = fx.inline_asm;
+    let inline_asm_names_fn = fx.inline_asm_names_fn;
 
     fx.constants_cx.finalize(fx.tcx, &mut *fx.module);
     *constants_cx = fx.constants_cx;
@@ -173,6 +175,7 @@ pub(crate) fn codegen_fn<'tcx>(
         never: matches!(attrs.inline, InlineAttr::Never),
         cold: attrs.flags.contains(CodegenFnAttrFlags::COLD),
         has_inline_asm: !inline_asm.is_empty(),
+        inline_asm_names_fn,
     };
 
     let regalloc = crate::regalloc_choice::hint(tcx, instance, inline_hints.cold);

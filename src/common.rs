@@ -319,6 +319,9 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
 
     pub(crate) inline_asm: String,
     pub(crate) inline_asm_index: u32,
+    /// Whether an `asm!` of this function names a function (a `sym` operand): the assembly then
+    /// refers to it by symbol name, which `inline::unreferenced_inlined` can't see.
+    pub(crate) inline_asm_names_fn: bool,
 }
 
 /// The unwind action of a shared panic call, see [`FunctionCx::shared_panics`].

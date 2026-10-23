@@ -123,6 +123,8 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                             );
                         }
 
+                        // A pointer constant may name a function by its symbol too.
+                        fx.inline_asm_names_fn = true;
                         let (prov, offset) = ptr.prov_and_relative_offset();
 
                         let alloc_id = prov.alloc_id();
@@ -172,6 +174,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                         .span_err(span, "asm! and global_asm! sym operands are not yet supported");
                 }
 
+                fx.inline_asm_names_fn = true;
                 let const_ = fx.monomorphize(value.const_);
                 if let ty::FnDef(def_id, args) = *const_.ty().kind() {
                     let instance = ty::Instance::resolve_for_fn_ptr(
