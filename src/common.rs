@@ -285,6 +285,12 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     /// calls tagged with [`crate::debuginfo::terminate_tag`] rather than calls with a landing
     /// pad that aborts (see [`terminate_calls`]).
     pub(crate) terminate_calls: bool,
+    /// Panic calls shared by all sites in this function that panic the same way (same panic
+    /// function, same unwind action), see `codegen_panic_inner`. Without debuginfo only.
+    pub(crate) shared_panics: rustc_data_structures::fx::FxHashMap<
+        (rustc_attr_ir::lang_items::LangItem, SharedUnwind),
+        Block,
+    >,
     /// The functions this function calls directly, see [`FunctionCx::get_function_ref`].
     pub(crate) func_refs: rustc_data_structures::fx::FxHashMap<Instance<'tcx>, FuncRef>,
 
@@ -292,6 +298,27 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
 
     pub(crate) inline_asm: String,
     pub(crate) inline_asm_index: u32,
+}
+
+/// The unwind action of a shared panic call, see [`FunctionCx::shared_panics`].
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum SharedUnwind {
+    Continue,
+    Unreachable,
+    Cleanup(BasicBlock),
+    // `UnwindTerminateReason` is a fieldless enum without `Hash`: its discriminant.
+    Terminate(u8),
+}
+
+impl SharedUnwind {
+    pub(crate) fn of(unwind: UnwindAction) -> Self {
+        match unwind {
+            UnwindAction::Continue => SharedUnwind::Continue,
+            UnwindAction::Unreachable => SharedUnwind::Unreachable,
+            UnwindAction::Cleanup(block) => SharedUnwind::Cleanup(block),
+            UnwindAction::Terminate(reason) => SharedUnwind::Terminate(reason as u8),
+        }
+    }
 }
 
 /// Where an unwinding call lands, see [`FunctionCx::landing_pads`].

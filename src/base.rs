@@ -118,6 +118,7 @@ pub(crate) fn codegen_fn<'tcx>(
         caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot: None,
         landing_pads: Default::default(),
+        shared_panics: Default::default(),
         terminate_calls: crate::common::terminate_calls(tcx),
         func_refs: Default::default(),
 
@@ -1244,6 +1245,54 @@ fn codegen_panic_inner<'tcx>(
         return;
     }
 
+    // Without debuginfo, all sites that panic the same way share one call: each site jumps to
+    // it with its arguments (the location among them, so the message is the same). That saves
+    // a call, its unwind table entry and the blocks around it (the unreachable return and an
+    // edge to the landing pad) per site; most functions have several overflow or bounds checks
+    // with the same cleanup. With debuginfo, every site keeps its own call and line.
+    if fx.func_debug_cx.is_none() {
+        let key = (lang_item, crate::common::SharedUnwind::of(unwind));
+        if let Some(&shared) = fx.shared_panics.get(&key) {
+            let params = fx.bcx.func.dfg.block_params(shared);
+            if params.len() == args.len()
+                && params
+                    .iter()
+                    .zip(args)
+                    .all(|(&p, &a)| fx.bcx.func.dfg.value_type(p) == fx.bcx.func.dfg.value_type(a))
+            {
+                let args: Vec<_> =
+                    args.iter().map(|&a| cranelift_codegen::ir::BlockArg::Value(a)).collect();
+                fx.bcx.ins().jump(shared, &args);
+                return;
+            }
+            return codegen_panic_call(fx, instance, args, unwind, span);
+        }
+        let shared = fx.bcx.create_block();
+        fx.shared_panics.insert(key, shared);
+        let params: Vec<Value> = args
+            .iter()
+            .map(|&arg| {
+                let ty = fx.bcx.func.dfg.value_type(arg);
+                fx.bcx.append_block_param(shared, ty)
+            })
+            .collect();
+        let jump_args: Vec<_> =
+            args.iter().map(|&a| cranelift_codegen::ir::BlockArg::Value(a)).collect();
+        fx.bcx.ins().jump(shared, &jump_args);
+        fx.bcx.switch_to_block(shared);
+        fx.bcx.set_cold_block(shared);
+        return codegen_panic_call(fx, instance, &params, unwind, span);
+    }
+    codegen_panic_call(fx, instance, args, unwind, span)
+}
+
+fn codegen_panic_call<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    instance: Instance<'tcx>,
+    args: &[Value],
+    unwind: UnwindAction,
+    span: Span,
+) {
     let symbol_name = fx.tcx.symbol_name(instance).name;
 
     let sig = Signature {
