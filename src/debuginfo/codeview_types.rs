@@ -65,11 +65,32 @@ const MEMBER_ATTRS: u16 = 3;
 pub(crate) struct CvTypeTable {
     pub(super) data: Vec<u8>,
     next_index: u32,
+    /// The forward reference of each aggregate by its unique name.
+    forward_by_unique: FxHashMap<String, u32>,
+    /// The complete record of each forward reference.
+    complete_of: FxHashMap<u32, u32>,
+    /// Every complete aggregate and enum, for their `S_UDT` symbols.
+    pub(super) udts: Vec<(String, u32)>,
 }
 
 impl CvTypeTable {
     pub(super) fn new(data: Vec<u8>, next_index: u32) -> Self {
-        CvTypeTable { data, next_index }
+        CvTypeTable {
+            data,
+            next_index,
+            forward_by_unique: FxHashMap::default(),
+            complete_of: FxHashMap::default(),
+            udts: Vec::new(),
+        }
+    }
+
+    /// The complete record of a type that is a forward reference, else the type itself.
+    ///
+    /// link.exe keeps only the type records that symbols reach (directly or through other
+    /// records); a complete record that only its unique name connects to the forward reference
+    /// is dropped from the PDB. Symbols name complete types, as LLVM's do.
+    pub(super) fn complete_type(&self, ty: u32) -> u32 {
+        self.complete_of.get(&ty).copied().unwrap_or(ty)
     }
 
     fn add(&mut self, kind: u16, f: impl FnOnce(&mut Vec<u8>)) -> u32 {
@@ -99,7 +120,7 @@ impl CvTypeTable {
     }
 
     fn forward(&mut self, kind: u16, name: &str, unique: &str) -> u32 {
-        self.add(kind, |r| {
+        let index = self.add(kind, |r| {
             r.extend_from_slice(&0u16.to_le_bytes()); // member count
             r.extend_from_slice(&(PROP_FWDREF | PROP_HAS_UNIQUE_NAME).to_le_bytes());
             r.extend_from_slice(&0u32.to_le_bytes()); // field list
@@ -109,7 +130,9 @@ impl CvTypeTable {
             }
             numeric(r, 0);
             name_and_unique(r, name, unique);
-        })
+        });
+        self.forward_by_unique.insert(unique.to_owned(), index);
+        index
     }
 
     fn complete(
@@ -135,7 +158,7 @@ impl CvTypeTable {
             }
         });
         let count = u16::try_from(members.len()).unwrap_or(u16::MAX);
-        self.add(kind, |r| {
+        let index = self.add(kind, |r| {
             r.extend_from_slice(&count.to_le_bytes());
             r.extend_from_slice(&PROP_HAS_UNIQUE_NAME.to_le_bytes());
             r.extend_from_slice(&field_list.to_le_bytes());
@@ -145,7 +168,12 @@ impl CvTypeTable {
             }
             numeric(r, size);
             name_and_unique(r, name, unique);
-        })
+        });
+        if let Some(&forward) = self.forward_by_unique.get(unique) {
+            self.complete_of.insert(forward, index);
+        }
+        self.udts.push((name.to_owned(), index));
+        index
     }
 }
 
@@ -170,13 +198,15 @@ impl CvTypeTable {
             }
         });
         let count = u16::try_from(enumerators.len()).unwrap_or(u16::MAX);
-        self.add(LF_ENUM, |r| {
+        let index = self.add(LF_ENUM, |r| {
             r.extend_from_slice(&count.to_le_bytes());
             r.extend_from_slice(&PROP_HAS_UNIQUE_NAME.to_le_bytes());
             r.extend_from_slice(&underlying.to_le_bytes());
             r.extend_from_slice(&field_list.to_le_bytes());
             name_and_unique(r, name, unique);
-        })
+        });
+        self.udts.push((name.to_owned(), index));
+        index
     }
 }
 
