@@ -339,6 +339,23 @@ fn compile_cgu(
                 aot_module.aliases.push((codegened_func.func_id, canonical));
                 continue;
             }
+            // A function that only forwards to another one becomes a jump to it (see
+            // `jump_thunk`).
+            if aot_module.debug_context.is_none()
+                && !codegened_func.inline_hints.has_inline_asm
+                && let Some((code, reloc)) = crate::jump_thunk::jump_thunk(
+                    &codegened_func.func,
+                    codegened_func.func_id,
+                    aot_module.module.isa(),
+                )
+            {
+                let alignment = 1 << aot_module.module.isa().flags().log2_min_function_alignment();
+                aot_module
+                    .module
+                    .define_frameless_function(codegened_func.func_id, alignment, &code, &[reloc])
+                    .unwrap();
+                continue;
+            }
             crate::base::compile_fn(
                 &prof,
                 dcx,

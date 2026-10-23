@@ -126,6 +126,21 @@ impl<T: Module> Module for UnwindModule<T> {
     }
 }
 
+impl UnwindModule<ObjectModule> {
+    /// Defines code without a frame of its own (`jump_thunk`), with the unwind info that says so.
+    pub(crate) fn define_frameless_function(
+        &mut self,
+        func_id: FuncId,
+        alignment: u64,
+        bytes: &[u8],
+        relocs: &[ModuleReloc],
+    ) -> ModuleResult<()> {
+        self.module.define_function_bytes(func_id, alignment, bytes, relocs)?;
+        self.unwind_context.add_frameless_function(&self.module, func_id, bytes.len() as u32);
+        Ok(())
+    }
+}
+
 /// Lets references to other functions and statics skip the GOT where the linker can resolve them
 /// directly, as LLVM does for Rust code (x86_64 only).
 ///

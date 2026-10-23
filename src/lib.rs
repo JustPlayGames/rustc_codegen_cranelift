@@ -70,6 +70,7 @@ mod fold_identical;
 mod global_asm;
 mod inline;
 mod inline_asm;
+mod jump_thunk;
 mod intrinsics;
 mod linkage;
 mod main_shim;

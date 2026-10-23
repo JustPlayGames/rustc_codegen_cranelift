@@ -232,6 +232,25 @@ impl UnwindContext {
                 || module.get_name(SEH_FREE).is_some())
     }
 
+    /// Unwind info for code without a frame (`jump_thunk`): where the return address and the
+    /// caller's stack pointer are stays as at the function's entry at every instruction, which
+    /// is what the CIE says. The FDE lets DWARF unwinders (a profiler's or a debugger's) step
+    /// out of it. On Windows a function without unwind info is such a leaf already.
+    pub(crate) fn add_frameless_function(
+        &mut self,
+        module: &dyn Module,
+        func_id: FuncId,
+        len: u32,
+    ) {
+        if module.isa().triple().binary_format != target_lexicon::BinaryFormat::Elf {
+            return;
+        }
+        let Some(cie_id) = self.plain_cie_id else { return };
+        let fde =
+            gimli::write::FrameDescriptionEntry::new(address_for_func(func_id), len);
+        self.frame_table.add_fde(cie_id, fde);
+    }
+
     pub(crate) fn add_function(
         &mut self,
         module: &mut dyn Module,
