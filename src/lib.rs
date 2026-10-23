@@ -338,6 +338,10 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
         flags_builder
             .set("log2_min_function_alignment", &align.bytes().ilog2().to_string())
             .unwrap();
+    } else if sess.target.arch == Arch::X86_64 {
+        // Start every function on 16 bytes as LLVM does on x86_64. Cranelift's minimum is 1, so
+        // function entries otherwise straddle instruction fetch blocks.
+        flags_builder.set("log2_min_function_alignment", "4").unwrap();
     }
 
     use rustc_session::config::OptLevel;
