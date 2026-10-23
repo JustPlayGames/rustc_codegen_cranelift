@@ -881,6 +881,8 @@ fn codegen_stmt<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, cur_block: Block, stmt:
                         .expect("expected monomorphic const in codegen");
                     if operand.layout().size.bytes() == 0 {
                         // Do nothing for ZST's
+                    } else if crate::mem_libcalls::emit_vector_repeat(fx, lval, operand, times) {
+                        // Splatted into a vector and stored 16 bytes at a time.
                     } else if times <= 16 && operand.layout().size.bytes() * times <= 256 {
                         // A short array: store each element at its offset.
                         for i in 0..times {
