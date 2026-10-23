@@ -399,8 +399,12 @@ impl CodeViewUnit {
             });
         }
 
-        subsection(&mut out, DEBUG_S_FILECHKSMS, |out| out.extend_from_slice(&checksums));
-        subsection(&mut out, DEBUG_S_STRINGTABLE, |out| out.extend_from_slice(&strings));
+        // link.exe rejects an empty file checksum subsection (LNK1103), as in an object without
+        // any line table (the allocator shim): leave both tables out then.
+        if !checksums.is_empty() {
+            subsection(&mut out, DEBUG_S_FILECHKSMS, |out| out.extend_from_slice(&checksums));
+            subsection(&mut out, DEBUG_S_STRINGTABLE, |out| out.extend_from_slice(&strings));
+        }
 
         let types_section =
             product.object.add_section(Vec::new(), b".debug$T".to_vec(), SectionKind::Debug);
