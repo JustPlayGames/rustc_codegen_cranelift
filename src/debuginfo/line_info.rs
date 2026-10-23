@@ -190,15 +190,21 @@ impl FunctionDebugContext {
         let mut func_end = 0;
 
         let mcr = context.compiled_code().unwrap();
+        let mut in_body = false;
         for &MachSrcLoc { start, end, loc } in mcr.buffer.get_srclocs_sorted() {
             let loc = loc.as_abs();
             debug_context.dwarf.unit.line_program.row().address_offset = u64::from(start);
             if !loc.is_default() {
                 let (file_id, line, column, _) = self.source_loc_set[loc.bits() as usize];
                 create_row_for_span(debug_context, (file_id, line, column));
-            } else {
+                in_body = true;
+            } else if !in_body {
+                // The prologue belongs to the function's line.
                 create_row_for_span(debug_context, self.function_source_loc);
             }
+            // Code without a location of its own inside the body (moves and spills the backend
+            // adds) continues the previous line: a row with the function's line would make
+            // stepping jump back to the signature.
             func_end = end;
         }
 
