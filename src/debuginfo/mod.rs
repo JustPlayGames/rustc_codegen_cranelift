@@ -331,7 +331,9 @@ impl DebugContext {
         entry.set(gimli::DW_AT_decl_file, AttributeValue::FileIndex(Some(file_id)));
         entry.set(gimli::DW_AT_decl_line, AttributeValue::Udata(line));
 
-        if !fn_abi.ret.is_ignore() {
+        // Types come with full debuginfo only, as with LLVM: limited debuginfo has no variables
+        // to show them with.
+        if tcx.sess.opts.debuginfo == DebugInfo::Full && !fn_abi.ret.is_ignore() {
             let return_dw_ty = self.debug_type(tcx, type_dbg, fn_abi.ret.layout.ty);
             let entry = self.dwarf.unit.get_mut(entry_id);
             entry.set(gimli::DW_AT_type, AttributeValue::UnitRef(return_dw_ty));
@@ -360,7 +362,8 @@ impl DebugContext {
         def_id: DefId,
         data_id: DataId,
     ) {
-        if tcx.sess.opts.debuginfo == DebugInfo::LineTablesOnly || self.codeview.is_some() {
+        // Like LLVM, statics are described with full debuginfo only.
+        if tcx.sess.opts.debuginfo != DebugInfo::Full || self.codeview.is_some() {
             return;
         }
 
