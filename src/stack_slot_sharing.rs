@@ -136,6 +136,10 @@ pub(crate) fn analyze<'tcx>(
         return sharing;
     }
 
+    // What each program point does to the candidates, read from the MIR once: the dataflow
+    // below visits blocks several times.
+    let events = Events::collect(mir, &index_of, points);
+
     // Maybe-live storage at each block entry: forward union dataflow.
     let n = candidates.len();
     let mut entry: IndexVec<BasicBlock, BitSet> =
@@ -179,7 +183,7 @@ pub(crate) fn analyze<'tcx>(
     let predecessors = mir.basic_blocks.predecessors();
     while let Some(bb) = worklist.pop() {
         queued[bb] = false;
-        let live = block_live_in(mir, bb, &index_of, n, &live_in, |_, _| {});
+        let live = block_live_in(mir, bb, &index_of, n, &live_in, &events, block_start[bb], |_, _| {});
         if live.0 != live_in[bb].0 {
             live_in[bb] = live;
             for &pred in &predecessors[bb] {
@@ -197,7 +201,6 @@ pub(crate) fn analyze<'tcx>(
     // Storage liveness before each statement of the current block (row i = before statement i,
     // the last row before the terminator), reused across blocks.
     let mut storage_at: Vec<u64> = vec![];
-    let mut mentioned: Vec<Vec<usize>> = vec![];
     // Forwarded sources by block.
     let mut skipped_in: IndexVec<BasicBlock, Vec<(usize, usize)>> =
         IndexVec::from_elem_n(vec![], mir.basic_blocks.len());
@@ -216,20 +219,10 @@ pub(crate) fn analyze<'tcx>(
                 apply(&stmt.kind, &index_of, &mut storage);
             }
         }
-        mentioned.clear();
-        mentioned.resize(rows, vec![]);
-        collect_mentions(mir, bb, &index_of, &mut mentioned);
-        // A forwarded source's memory is the call's argument: it is in use from its move to the
-        // call, although its value is dead after the move.
-        for &(statement_index, c) in &skipped_in[bb] {
-            for m in &mut mentioned[statement_index..] {
-                m.push(c);
-            }
-        }
         let start = block_start[bb];
         // Value liveness before each statement of the block, from the end: a candidate occupies
         // its slot where its storage is live and it is borrowed or its value is live.
-        block_live_in(mir, bb, &index_of, n, &live_in, |i, value_live| {
+        block_live_in(mir, bb, &index_of, n, &live_in, &events, start, |i, value_live| {
             let point = start + i;
             let storage = &storage_at[i * words..(i + 1) * words];
             for (w, ((&s, &v), &b)) in storage.iter().zip(&value_live.0).zip(&borrowed.0).enumerate()
@@ -238,8 +231,16 @@ pub(crate) fn analyze<'tcx>(
                     live_at[w * 64 + bit].insert(point);
                 }
             }
-            for &c in &mentioned[i] {
-                live_at[c].insert(point);
+            // Every candidate the statement mentions.
+            for &(c, _) in events.at(point) {
+                live_at[c as usize].insert(point);
+            }
+            // A forwarded source's memory is the call's argument: it is in use from its move to
+            // the call, although its value is dead after the move.
+            for &(statement_index, c) in &skipped_in[bb] {
+                if statement_index <= i {
+                    live_at[c].insert(point);
+                }
             }
         });
     }
@@ -288,14 +289,17 @@ fn apply(kind: &StatementKind<'_>, index_of: &IndexVec<Local, Option<usize>>, li
     }
 }
 
-/// Value liveness at the entry of `bb` from its successors' entries. `each(i, live)` sees the liveness before the terminator (`i` = number of
-/// statements) and then before each statement, from the last to the first.
+/// Value liveness at the entry of `bb` from its successors' entries. `each(i, live)` sees the
+/// liveness before the terminator (`i` = number of statements) and then before each statement,
+/// from the last to the first.
 fn block_live_in<'tcx>(
     mir: &rustc_middle::mir::Body<'tcx>,
     bb: BasicBlock,
     index_of: &IndexVec<Local, Option<usize>>,
     n: usize,
     live_in: &IndexVec<BasicBlock, BitSet>,
+    events: &Events,
+    start: usize,
     mut each: impl FnMut(usize, &BitSet),
 ) -> BitSet {
     let data = &mir.basic_blocks[bb];
@@ -319,77 +323,91 @@ fn block_live_in<'tcx>(
             live.union(&live_in[succ]);
         }
     }
-    let mut transfer = Transfer { index_of, live: &mut live };
-    transfer.visit_terminator(
-        terminator,
-        Location { block: bb, statement_index: data.statements.len() },
-    );
-    each(data.statements.len(), &live);
-    for (i, stmt) in data.statements.iter().enumerate().rev() {
-        Transfer { index_of, live: &mut live }
-            .visit_statement(stmt, Location { block: bb, statement_index: i });
+    for i in (0..=data.statements.len()).rev() {
+        events.transfer(start + i, &mut live);
         each(i, &live);
     }
     live
 }
 
-/// Backward liveness transfer of one statement or terminator, field-insensitively: a write of the
-/// whole local kills it, any read, borrow or partial write keeps it alive.
-struct Transfer<'a> {
-    index_of: &'a IndexVec<Local, Option<usize>>,
-    live: &'a mut BitSet,
+/// What a statement or terminator does to the candidates, in the order the MIR visitor meets
+/// them: backward liveness transfer, field-insensitively (a write of the whole local kills it,
+/// any read, borrow or partial write keeps it alive), and which candidates it mentions at all.
+struct Events {
+    /// (candidate, effect) of all points, point after point.
+    list: Vec<(u32, Effect)>,
+    /// Where each point's events start in `list` (one more entry than points).
+    start: Vec<u32>,
 }
 
-impl<'tcx> Visitor<'tcx> for Transfer<'_> {
-    // `super_place` hands a projected place's base local a `Projection` context, so only a write
-    // of the whole local reaches here as a store.
-    fn visit_local(&mut self, local: Local, context: PlaceContext, _location: Location) {
-        if let Some(c) = self.index_of[local] {
-            match context {
-                PlaceContext::NonUse(_) => {}
-                // A call's destination is written on the return edge: see `block_live_in`.
-                PlaceContext::MutatingUse(MutatingUseContext::Call) => {}
-                PlaceContext::MutatingUse(
-                    MutatingUseContext::Store
-                    | MutatingUseContext::AsmOutput
-                    | MutatingUseContext::Yield,
-                ) => self.live.remove(c),
-                _ => self.live.insert(c),
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Effect {
+    /// Read, borrowed or partly written: alive before.
+    Use,
+    /// Written whole: dead before (unless also used).
+    Def,
+    /// A call's destination, written on the return edge (see `block_live_in`): no effect here.
+    CallDest,
+}
+
+impl Events {
+    fn collect<'tcx>(
+        mir: &rustc_middle::mir::Body<'tcx>,
+        index_of: &IndexVec<Local, Option<usize>>,
+        points: usize,
+    ) -> Events {
+        struct Collect<'a> {
+            index_of: &'a IndexVec<Local, Option<usize>>,
+            list: Vec<(u32, Effect)>,
+        }
+        impl<'tcx> Visitor<'tcx> for Collect<'_> {
+            // `super_place` hands a projected place's base local a `Projection` context, so only
+            // a write of the whole local reaches here as a store.
+            fn visit_local(&mut self, local: Local, context: PlaceContext, _location: Location) {
+                if let Some(c) = self.index_of[local] {
+                    let effect = match context {
+                        PlaceContext::NonUse(_) => return,
+                        PlaceContext::MutatingUse(MutatingUseContext::Call) => Effect::CallDest,
+                        PlaceContext::MutatingUse(
+                            MutatingUseContext::Store
+                            | MutatingUseContext::AsmOutput
+                            | MutatingUseContext::Yield,
+                        ) => Effect::Def,
+                        _ => Effect::Use,
+                    };
+                    self.list.push((c as u32, effect));
+                }
+            }
+        }
+        let mut collect = Collect { index_of, list: vec![] };
+        let mut start = Vec::with_capacity(points + 1);
+        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+            for (i, stmt) in data.statements.iter().enumerate() {
+                start.push(collect.list.len() as u32);
+                collect.visit_statement(stmt, Location { block: bb, statement_index: i });
+            }
+            start.push(collect.list.len() as u32);
+            collect.visit_terminator(
+                data.terminator(),
+                Location { block: bb, statement_index: data.statements.len() },
+            );
+        }
+        start.push(collect.list.len() as u32);
+        Events { list: collect.list, start }
+    }
+
+    fn at(&self, point: usize) -> &[(u32, Effect)] {
+        &self.list[self.start[point] as usize..self.start[point + 1] as usize]
+    }
+
+    /// Liveness before the point from liveness after it.
+    fn transfer(&self, point: usize, live: &mut BitSet) {
+        for &(c, effect) in self.at(point) {
+            match effect {
+                Effect::Use => live.insert(c as usize),
+                Effect::Def => live.remove(c as usize),
+                Effect::CallDest => {}
             }
         }
     }
-}
-
-/// The candidates each statement (and, last, the terminator) of `bb` mentions at all.
-fn collect_mentions<'tcx>(
-    mir: &rustc_middle::mir::Body<'tcx>,
-    bb: BasicBlock,
-    index_of: &IndexVec<Local, Option<usize>>,
-    mentioned: &mut [Vec<usize>],
-) {
-    struct Mentions<'a> {
-        index_of: &'a IndexVec<Local, Option<usize>>,
-        out: Vec<usize>,
-    }
-    impl<'tcx> Visitor<'tcx> for Mentions<'_> {
-        fn visit_local(&mut self, local: Local, context: PlaceContext, _location: Location) {
-            if !matches!(context, PlaceContext::NonUse(_))
-                && let Some(c) = self.index_of[local]
-            {
-                self.out.push(c);
-            }
-        }
-    }
-    let data = &mir.basic_blocks[bb];
-    for (i, stmt) in data.statements.iter().enumerate() {
-        let mut m = Mentions { index_of, out: vec![] };
-        m.visit_statement(stmt, Location { block: bb, statement_index: i });
-        mentioned[i] = m.out;
-    }
-    let mut m = Mentions { index_of, out: vec![] };
-    m.visit_terminator(
-        data.terminator(),
-        Location { block: bb, statement_index: data.statements.len() },
-    );
-    mentioned[data.statements.len()] = m.out;
 }
