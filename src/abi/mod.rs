@@ -658,6 +658,16 @@ pub(crate) fn codegen_terminator_call<'tcx>(
         }
     };
 
+    // A call that leaves nothing to store after it returns (no return value, or one the callee
+    // writes straight into the destination's memory) continues at its target block directly: an
+    // unwinding call would otherwise get a block of its own to return to, just to jump on.
+    let direct_target = match fn_abi.ret.mode {
+        PassMode::Ignore => target,
+        PassMode::Indirect { .. } if ret_place.try_to_ptr().is_some() => target,
+        _ => None,
+    };
+    let direct_target_block = direct_target.map(|dest| fx.get_block(dest));
+
     self::returning::codegen_with_call_return_arg(fx, &fn_abi.ret, ret_place, |fx, return_ptr| {
         let mut call_args = return_ptr
             .into_iter()
@@ -682,10 +692,19 @@ pub(crate) fn codegen_terminator_call<'tcx>(
             with_no_trimmed_paths!(fx.add_post_comment(nop_inst, format!("abi: {:?}", fn_abi)));
         }
 
-        codegen_call_with_unwind_action(fx, source_info.span, func_ref, unwind, &call_args, None)
+        codegen_call_with_unwind_action(
+            fx,
+            source_info.span,
+            func_ref,
+            unwind,
+            &call_args,
+            direct_target_block,
+        )
     });
 
-    if let Some(dest) = target {
+    if direct_target.is_some() {
+        // The call already continues at its target.
+    } else if let Some(dest) = target {
         let ret_block = fx.get_block(dest);
         fx.bcx.ins().jump(ret_block, &[]);
     } else {
@@ -980,16 +999,16 @@ pub(crate) fn codegen_call_with_unwind_action(
                 .map(|return_param| return_param.value_type)
                 .collect::<Vec<_>>();
 
-            let fallthrough_block = fx.bcx.create_block();
+            // A call without a target block returns into a block of its own, which gets the
+            // return values.
+            let fallthrough_block = target_block.unwrap_or_else(|| fx.bcx.create_block());
             let fallthrough_block_call_args = returns_types
                 .iter()
                 .enumerate()
                 .map(|(i, _)| BlockArg::TryCallRet(i.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            let fallthrough_block_call = fx.bcx.func.dfg.block_call(
-                target_block.unwrap_or(fallthrough_block),
-                &fallthrough_block_call_args,
-            );
+            let fallthrough_block_call =
+                fx.bcx.func.dfg.block_call(fallthrough_block, &fallthrough_block_call_args);
             let tag = match unwind {
                 UnwindAction::Terminate(_) => EXCEPTION_HANDLER_TERMINATE,
                 _ => EXCEPTION_HANDLER_CLEANUP,
