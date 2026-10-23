@@ -24,6 +24,7 @@ aot.move_forwarding
 aot.inline_calls
 aot.simd_vector_ops
 aot.volatile_unused
+aot.volatile_mmio
 aot.ssa_adts
 aot.small_mem_copies
 aot.splat_repeat

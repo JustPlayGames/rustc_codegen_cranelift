@@ -513,14 +513,14 @@ fn codegen_regular_intrinsic_call<'tcx>(
                 count
             };
 
-            // FIXME make the copy actually volatile when using emit_small_mem{cpy,move}
-            if intrinsic == sym::volatile_copy_nonoverlapping_memory {
-                // FIXME emit_small_memcpy
-                fx.bcx.call_memcpy(fx.target_config, dst, src, byte_amount);
+            // A real call (see volatile_mem_call): the libcall would become plain loads and
+            // stores once its size is known, which Cranelift may merge or remove.
+            let name = if intrinsic == sym::volatile_copy_nonoverlapping_memory {
+                "memcpy"
             } else {
-                // FIXME emit_small_memmove
-                fx.bcx.call_memmove(fx.target_config, dst, src, byte_amount);
-            }
+                "memmove"
+            };
+            volatile_mem_call(fx, name, dst, src, byte_amount);
         }
         sym::size_of_val => {
             intrinsic_args!(fx, args => (ptr); intrinsic);
@@ -666,9 +666,14 @@ fn codegen_regular_intrinsic_call<'tcx>(
                 count
             };
             let dst_ptr = dst.load_scalar(fx);
-            // FIXME make the memset actually volatile when switching to emit_small_memset
-            // FIXME use emit_small_memset
-            fx.bcx.call_memset(fx.target_config, dst_ptr, val, count);
+            if intrinsic == sym::volatile_set_memory {
+                // A real call, as for volatile_copy_memory.
+                let val = fx.bcx.ins().uextend(types::I32, val);
+                volatile_mem_call(fx, "memset", dst_ptr, val, count);
+            } else {
+                // FIXME use emit_small_memset
+                fx.bcx.call_memset(fx.target_config, dst_ptr, val, count);
+            }
         }
         sym::ctlz | sym::ctlz_nonzero => {
             intrinsic_args!(fx, args => (arg); intrinsic);
@@ -761,20 +766,27 @@ fn codegen_regular_intrinsic_call<'tcx>(
         sym::volatile_load | sym::unaligned_volatile_load => {
             intrinsic_args!(fx, args => (ptr); intrinsic);
 
-            // FIXME correctly handle unaligned_volatile_load
+            // The loads never claim alignment, so they serve unaligned_volatile_load too.
             let inner_layout = fx.layout_of(ptr.layout().ty.builtin_deref(true).unwrap());
             let ptr = Pointer::new(ptr.load_scalar(fx));
             let val = volatile_load(fx, ptr, inner_layout);
             ret.write_cvalue(fx, val);
         }
-        sym::volatile_store | sym::unaligned_volatile_store | sym::nontemporal_store => {
+        sym::volatile_store | sym::unaligned_volatile_store => {
             intrinsic_args!(fx, args => (ptr, val); intrinsic);
             let ptr = ptr.load_scalar(fx);
 
-            // FIXME correctly handle unaligned_volatile_store
+            // The stores never claim alignment, so they serve unaligned_volatile_store too.
+            volatile_store(fx, Pointer::new(ptr), val);
+        }
+        sym::nontemporal_store => {
+            intrinsic_args!(fx, args => (ptr, val); intrinsic);
+            let ptr = ptr.load_scalar(fx);
+
             // FIXME actually do nontemporal stores if requested (but do not just emit MOVNT on x86;
             // see the LLVM backend for details)
-            volatile_store(fx, Pointer::new(ptr), val);
+            let dest = CPlace::for_ptr(Pointer::new(ptr), val.layout());
+            dest.write_cvalue(fx, val);
         }
 
         sym::ptr_offset_from | sym::ptr_offset_from_unsigned => {
@@ -1601,15 +1613,66 @@ fn codegen_regular_intrinsic_call<'tcx>(
     Ok(())
 }
 
-/// Loads a value for `read_volatile` right away. The loads may trap (no `notrap` flag), so
-/// Cranelift never removes them, not even when the value is unused (as after inlining
-/// `read_volatile` into a caller that ignores it) or loaded again.
+/// The flags of every volatile access: `volatile`, so that Cranelift performs each one exactly as
+/// written (never removed, merged, forwarded, reordered with another volatile access or folded
+/// into another instruction), and able to trap, so that a fault stays where it happens.
+fn volatile_flags() -> MemFlagsData {
+    MemFlagsData::new().with_volatile()
+}
+
+/// The most chunks [`volatile_copy`] writes out as loads and stores before calling `memmove`.
+const VOLATILE_COPY_MAX_CHUNKS: u64 = 64;
+
+/// Copies `size` bytes for a volatile access of a value kept in memory (an array or another
+/// aggregate). The side at `volatile_ptr` is accessed with volatile loads (`load`) or stores
+/// (`!load`) of `align` bytes each (at most 8), in address order; the other side is a plain stack
+/// copy. Large copies call `memmove` instead, as a real call that is never expanded.
+fn volatile_copy(
+    fx: &mut FunctionCx<'_, '_, '_>,
+    dst: Value,
+    src: Value,
+    size: u64,
+    align: u64,
+    load: bool,
+) {
+    let chunk = align.clamp(1, 8);
+    if size % chunk != 0 || size / chunk > VOLATILE_COPY_MAX_CHUNKS {
+        let size = fx.bcx.ins().iconst(fx.pointer_type, i64::try_from(size).unwrap());
+        volatile_mem_call(fx, "memmove", dst, src, size);
+        return;
+    }
+    let ty = Type::int_with_byte_size(u16::try_from(chunk).unwrap()).unwrap();
+    let (src_flags, dst_flags) = if load {
+        (volatile_flags(), MemFlagsData::trusted())
+    } else {
+        (MemFlagsData::trusted(), volatile_flags())
+    };
+    for i in 0..size / chunk {
+        let offset = i32::try_from(i * chunk).unwrap();
+        let val = fx.bcx.ins().load(ty, src_flags, src, offset);
+        fx.bcx.ins().store(dst_flags, val, dst, offset);
+    }
+}
+
+/// Calls `memcpy`, `memmove` or `memset` for a volatile copy or fill through an import of the
+/// function itself rather than a Cranelift libcall: libcalls whose size turns out constant become
+/// plain loads and stores (`mem_libcalls`), which Cranelift may merge or remove, while a call is
+/// always made.
+fn volatile_mem_call(fx: &mut FunctionCx<'_, '_, '_>, name: &str, dst: Value, b: Value, size: Value) {
+    let ptr = AbiParam::new(fx.pointer_type);
+    let b_param = if name == "memset" { AbiParam::new(types::I32) } else { ptr };
+    fx.lib_call(name, vec![ptr, b_param, ptr], vec![], &[dst, b, size]);
+}
+
+/// Loads a value for `read_volatile` right away, with [`volatile_flags`]: Cranelift performs
+/// each load even when the value is unused (as after inlining `read_volatile` into a caller that
+/// ignores it) and never merges it with another load or forwards a stored value to it.
 fn volatile_load<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     ptr: Pointer,
     layout: TyAndLayout<'tcx>,
 ) -> CValue<'tcx> {
-    let flags = MemFlagsData::new();
+    let flags = volatile_flags();
     match layout.backend_repr {
         _ if layout.is_zst() => CValue::zst(layout),
         BackendRepr::Scalar(scalar) => {
@@ -1627,29 +1690,19 @@ fn volatile_load<'tcx>(
             CValue::by_val(ptr.load(fx, ty, flags), layout)
         }
         _ => {
-            // Copy into a stack slot of our own with trapping loads.
+            // Copy into a stack slot of our own with volatile loads.
             let place = CPlace::new_stack_slot(fx, layout);
             let src = ptr.get_addr(fx);
             let dst = place.to_ptr().get_addr(fx);
-            let align = layout.align.bytes().try_into().unwrap_or(128);
-            fx.bcx.emit_small_memory_copy(
-                fx.target_config,
-                dst,
-                src,
-                layout.size.bytes(),
-                align,
-                align,
-                true,
-                flags,
-            );
+            volatile_copy(fx, dst, src, layout.size.bytes(), layout.align.bytes(), true);
             place.to_cvalue(fx)
         }
     }
 }
 
-/// Stores a value for `write_volatile`, with stores that may trap like [`volatile_load`]'s loads.
+/// Stores a value for `write_volatile`, with [`volatile_flags`] like [`volatile_load`]'s loads.
 fn volatile_store<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, ptr: Pointer, val: CValue<'tcx>) {
-    let flags = MemFlagsData::new();
+    let flags = volatile_flags();
     let layout = val.layout();
     match layout.backend_repr {
         _ if layout.is_zst() => {}
@@ -1662,6 +1715,12 @@ fn volatile_store<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, ptr: Pointer, val: CV
             ptr.store(fx, val1, flags);
             ptr.offset_i64(fx, i64::try_from(b_offset.bytes()).unwrap()).store(fx, val2, flags);
         }
-        _ => CPlace::for_ptr(ptr, layout).write_cvalue(fx, val),
+        _ => {
+            // Copy from the value's memory with volatile stores.
+            let (src, _) = val.force_stack(fx);
+            let src = src.get_addr(fx);
+            let dst = ptr.get_addr(fx);
+            volatile_copy(fx, dst, src, layout.size.bytes(), layout.align.bytes(), false);
+        }
     }
 }
