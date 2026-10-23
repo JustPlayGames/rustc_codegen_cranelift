@@ -149,6 +149,27 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.backtrace_frames", &|runner| {
+        // Backtraces unwind through functions without a frame pointer.
+        for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
+            let name = format!("backtrace_frames{opt}{debuginfo}");
+            runner.run_rustc([
+                "example/backtrace_frames.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cdebuginfo={debuginfo}"),
+                "--crate-name",
+                &name,
+            ]);
+            let mut args = vec![];
+            if debuginfo != "0" {
+                args.push("lines");
+            }
+            if runner.panic_unwind_support {
+                args.push("unwind");
+            }
+            runner.run_out_command(&name, &args);
+        }
+    }),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();
