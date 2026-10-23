@@ -9,7 +9,7 @@ use crate::prepare::{GitRepo, apply_patches};
 use crate::rustc_info::get_default_sysroot;
 use crate::shared_utils::rustflags_from_env;
 use crate::utils::{CargoProject, Compiler, LogGroup, ensure_empty_dir, spawn_and_wait};
-use crate::{CodegenBackend, build_sysroot, config};
+use crate::{CodegenBackend, build_sysroot, codeview_check, config};
 
 static BUILD_EXAMPLE_OUT_DIR: RelPath = RelPath::build("example");
 
@@ -238,6 +238,7 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             "expected graceful error, not ICE:\n{combined}"
         );
     }),
+    TestCase::custom("aot.codeview", &|runner| runner.check_codeview()),
     TestCase::build_bin_and_run("aot.issue-72793", "example/issue-72793.rs", &[]),
     TestCase::build_bin("aot.issue-59326", "example/issue-59326.rs"),
     TestCase::build_bin_and_run("aot.gen_block_iterate", "example/gen_block_iterate.rs", &[]),
@@ -737,6 +738,104 @@ impl<'a> TestRunner<'a> {
         S: AsRef<OsStr>,
     {
         spawn_and_wait(self.rustc_command(args));
+    }
+
+    /// CodeView debuginfo as MSVC's link.exe wants it: objects for x86_64-pc-windows-msvc (no
+    /// linking needed, so on any x86_64 host) at every debuginfo level, checked by
+    /// `codeview_check` for the rules lld-link does not enforce.
+    fn check_codeview(&self) {
+        if !self.target_compiler.target.starts_with("x86_64") {
+            eprintln!("[SKIP] CodeView needs the x86_64 backend");
+            return;
+        }
+        let dir = BUILD_EXAMPLE_OUT_DIR.to_path(&self.dirs).join("codeview");
+        ensure_empty_dir(&dir);
+        let rustc = |args: &[&str]| {
+            let mut cmd = Command::new(&self.target_compiler.rustc);
+            cmd.args(&self.target_compiler.rustflags);
+            cmd.args(["--target", "x86_64-pc-windows-msvc", "-Cpanic=abort", "--edition=2024"]);
+            cmd.arg("-Zforce-unstable-if-unmarked");
+            cmd.arg("-L");
+            cmd.arg(format!("crate={}", dir.display()));
+            cmd.args(args);
+            spawn_and_wait(cmd);
+        };
+        let dir_str = dir.to_str().unwrap();
+        rustc(&[
+            "example/mini_core.rs",
+            "--crate-name=mini_core",
+            "--crate-type=lib",
+            "--out-dir",
+            dir_str,
+        ]);
+
+        // Field lists longer than a type record (LF_INDEX continuations), and a codegen unit
+        // without functions and so without line tables (as the allocator shim's).
+        let wide_fields: String =
+            (0..3000).map(|i| format!("    pub field_with_a_long_name_{i:05}: u8,\n")).collect();
+        let many_variants: String =
+            (0..3000).map(|i| format!("    VariantWithALongName{i:05},\n")).collect();
+        fs::write(
+            dir.join("codeview_wide.rs"),
+            format!(
+                "#![feature(no_core)]\n#![no_core]\n#![allow(dead_code, unused_variables)]\nextern crate mini_core;\n\
+                 pub struct Wide {{\n{wide_fields}}}\npub enum Many {{\n{many_variants}}}\n\
+                 #[inline(never)]\npub fn wide(w: &Wide, many: Many) -> u8 {{\n    \
+                 let copy = w.field_with_a_long_name_02999;\n    copy\n}}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("codeview_data.rs"),
+            "#![feature(no_core)]\n#![no_core]\nextern crate mini_core;\n\
+             pub static DATA: [u8; 4] = [1, 2, 3, 4];\n",
+        )
+        .unwrap();
+
+        let mut cases = vec![];
+        for debuginfo in ["0", "1", "2"] {
+            cases.push((
+                "example/codeview.rs".to_owned(),
+                debuginfo,
+                format!("codeview{debuginfo}.o"),
+            ));
+        }
+        for name in ["codeview_wide", "codeview_data"] {
+            let source = dir.join(format!("{name}.rs")).to_str().unwrap().to_owned();
+            cases.push((source, "2", format!("{name}.o")));
+        }
+        for (source, debuginfo, object) in &cases {
+            let out = dir.join(object);
+            rustc(&[
+                source,
+                "--crate-type=lib",
+                "--emit=obj",
+                &format!("-Cdebuginfo={debuginfo}"),
+                "-o",
+                out.to_str().unwrap(),
+            ]);
+            let summary = match codeview_check::check(&fs::read(&out).unwrap()) {
+                Ok(summary) => summary,
+                Err(problems) => {
+                    eprintln!("{object}: the CodeView breaks link.exe's rules:");
+                    for problem in problems {
+                        eprintln!("    {problem}");
+                    }
+                    panic!("{object}: invalid CodeView");
+                }
+            };
+            // The check must have had something to check.
+            let ok = match (object.as_str(), *debuginfo) {
+                ("codeview_data.o", _) => summary.procedures == 0,
+                ("codeview_wide.o", _) => summary.continuations >= 2 && summary.locals > 0,
+                (_, "0") => summary.procedures == 0,
+                (_, "1") => {
+                    summary.procedures > 0 && summary.line_blocks > 0 && summary.locals == 0
+                }
+                _ => summary.complete_udts > 0 && summary.locals > 0 && summary.line_blocks > 0,
+            };
+            assert!(ok, "{object}: unexpected CodeView contents: {summary:?}");
+        }
     }
 
     fn run_out_command(&self, name: &str, args: &[&str]) {
