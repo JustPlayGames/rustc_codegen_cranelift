@@ -6,8 +6,9 @@
 //! libcalls. LLVM's always-inliner propagates the constant into `llvm.memcpy`, which instruction
 //! selection expands even without optimizations. This pass does the same once the CGU's
 //! functions are inlined: a libcall whose size argument folds to a constant up to
-//! [`MAX_INLINE_BYTES`] becomes 16-byte vector and scalar loads followed by the stores (all loads
-//! first, so `memmove`'s overlapping copies stay correct).
+//! [`MAX_INLINE_BYTES`] becomes 16-byte vector and scalar loads and stores: a `memcpy` stores
+//! each chunk right after loading it, a `memmove` loads all chunks first so overlapping copies
+//! stay correct.
 //!
 //! Only on x86_64 and AArch64, where unaligned scalar and 128-bit vector accesses are always
 //! allowed: the libcall gives no alignment.
@@ -15,6 +16,7 @@
 //! [`FunctionBuilder::emit_small_memory_copy`]: cranelift_frontend::FunctionBuilder::emit_small_memory_copy
 
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::{
     self, BlockArg, ConstantData, ExternalName, InstBuilder, InstructionData, LibCall,
     MemFlagsData, Opcode, Value, ValueDef, types,
@@ -46,10 +48,11 @@ pub(crate) fn emit_vector_copy(
         return false;
     }
     debug_assert!(!flags.aligned(), "the alignment of 16-byte accesses is not known");
-    let loads: Vec<_> = chunks(size)
-        .map(|(offset, ty)| (fx.bcx.ins().load(ty, flags, src, offset), offset))
-        .collect();
-    for (value, offset) in loads {
+    // A value's copy never overlaps its source: each chunk is stored right after its load, so the
+    // copy needs one register however long it is (on Windows x64, more than six vector registers
+    // live at once means saving and restoring the callee-saved XMM6-15 in the prologue/epilogue).
+    for (offset, ty) in chunks(size) {
+        let value = fx.bcx.ins().load(ty, flags, src, offset);
         fx.bcx.ins().store(flags, value, dest, offset);
     }
     true
@@ -97,6 +100,7 @@ pub(crate) fn emit_vector_repeat<'tcx>(
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Kind {
     Copy,
+    Move,
     Set,
 }
 
@@ -142,7 +146,8 @@ pub(crate) fn inline_small_mem_libcalls(func: &mut ir::Function) {
                 continue;
             };
             let kind = match func.dfg.ext_funcs[func_ref].name {
-                ExternalName::LibCall(LibCall::Memcpy | LibCall::Memmove) => Kind::Copy,
+                ExternalName::LibCall(LibCall::Memcpy) => Kind::Copy,
+                ExternalName::LibCall(LibCall::Memmove) => Kind::Move,
                 ExternalName::LibCall(LibCall::Memset) => Kind::Set,
                 _ => continue,
             };
@@ -152,6 +157,15 @@ pub(crate) fn inline_small_mem_libcalls(func: &mut ir::Function) {
             }
             let Some(size) = consts.value(args[2], 0) else { continue };
             if size > MAX_INLINE_BYTES {
+                continue;
+            }
+            // A memmove loads everything before it stores. Windows x64 has six caller-saved
+            // vector registers (XMM0-5); more would make the function save XMM6-15, so longer
+            // memmoves stay calls there.
+            if kind == Kind::Move
+                && func.signature.call_conv == CallConv::WindowsFastcall
+                && size / 16 > 6
+            {
                 continue;
             }
             let fill = if kind == Kind::Set {
@@ -173,6 +187,15 @@ pub(crate) fn inline_small_mem_libcalls(func: &mut ir::Function) {
         let flags = MemFlagsData::new().with_notrap();
         match kind {
             Kind::Copy => {
+                // memcpy's source and destination never overlap: store each chunk right after
+                // its load (one live register, see `emit_vector_copy`).
+                let src = args[1];
+                for (offset, ty) in chunks(size) {
+                    let val = pos.ins().load(ty, flags, src, offset);
+                    pos.ins().store(flags, val, dest, offset);
+                }
+            }
+            Kind::Move => {
                 let src = args[1];
                 let mut loads = Vec::new();
                 for (offset, ty) in chunks(size) {
