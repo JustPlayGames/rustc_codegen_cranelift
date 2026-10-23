@@ -45,6 +45,13 @@ impl BackendConfig {
                 // Read by `inline::inline_mode`.
                 continue;
             }
+            if let Some(value) = opt.strip_prefix("clif-terminate=") {
+                // Read by `common::terminate_calls`.
+                match value {
+                    "calls" | "pads" => continue,
+                    _ => return Err(format!("clif-terminate: expected calls or pads, got `{value}`")),
+                }
+            }
             if let Some(algorithm) = opt.strip_prefix("regalloc=") {
                 match algorithm {
                     "backtracking" | "single_pass" | "mixed" => {

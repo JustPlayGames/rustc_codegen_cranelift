@@ -281,6 +281,10 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     /// The blocks unwinding calls land in, one per cleanup block (storing the exception pointer
     /// and jumping to it) and one per reason to abort, shared by all calls that unwind there.
     pub(crate) landing_pads: rustc_data_structures::fx::FxHashMap<LandingPad, Block>,
+    /// Whether calls that must abort when they unwind (`UnwindAction::Terminate`) are plain
+    /// calls tagged with [`crate::debuginfo::terminate_tag`] rather than calls with a landing
+    /// pad that aborts (see [`terminate_calls`]).
+    pub(crate) terminate_calls: bool,
     /// The functions this function calls directly, see [`FunctionCx::get_function_ref`].
     pub(crate) func_refs: rustc_data_structures::fx::FxHashMap<Instance<'tcx>, FuncRef>,
 
@@ -506,4 +510,33 @@ impl<'tcx> HasTargetSpec for FullyMonomorphizedLayoutCx<'tcx> {
     fn target_spec(&self) -> &Target {
         &self.0.sess.target
     }
+}
+
+/// Whether `UnwindAction::Terminate` calls are plain calls that the unwind tables mark to abort
+/// (the default), or calls with a landing pad that aborts (`-Cllvm-args=clif-terminate=pads`,
+/// as LLVM does). Plain calls cost no block, landing pad or block parameters; when one unwinds,
+/// the panic aborts during the search for a handler, before any destructor runs: the panic's
+/// message is printed as ever, then on Itanium-ABI targets "failed to initiate panic" instead
+/// of "panic in a function that cannot unwind" (Rust's personality ends the search at a call
+/// site its table leaves out); the SEH runtime calls the same panic function a landing pad
+/// would. compiler_builtins keeps the pads: it may not call into core.
+pub(crate) fn terminate_calls(tcx: TyCtxt<'_>) -> bool {
+    if tcx.is_compiler_builtins(LOCAL_CRATE) {
+        return false;
+    }
+    for opt in &tcx.sess.opts.cg.llvm_args {
+        if let Some(value) = opt.strip_prefix("clif-terminate=") {
+            return value != "pads";
+        }
+    }
+    true
+}
+
+/// The symbols of the panic functions that `UnwindTerminateReason::{Abi, InCleanup}` call
+/// (`None` where the lang item doesn't exist).
+pub(crate) fn terminate_symbols(tcx: TyCtxt<'_>) -> [Option<String>; 2] {
+    [UnwindTerminateReason::Abi, UnwindTerminateReason::InCleanup].map(|reason| {
+        let def_id = tcx.lang_items().get(reason.lang_item())?;
+        Some(tcx.symbol_name(Instance::mono(tcx, def_id)).name.to_owned())
+    })
 }

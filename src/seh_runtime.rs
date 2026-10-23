@@ -35,6 +35,7 @@ const EXCEPTION_TARGET_UNWIND: i64 = 0x20;
 const EXCEPTION_CONTINUE_SEARCH: i64 = 1;
 const KIND_CLEANUP: i64 = 0;
 const KIND_CATCH: i64 = 1;
+const KIND_ABORT: i64 = crate::debuginfo::SEH_KIND_ABORT as i64;
 
 /// Marks a heap copy (header word) and a stash in an exception record.
 const COPY_MAGIC: i64 = 0x6367_636c_6966_6578;
@@ -61,7 +62,9 @@ const DC_HANDLER_DATA: i32 = 56;
 const DC_HISTORY_TABLE: i32 = 64;
 
 /// Defines the SEH runtime functions in `module`, local to it.
-pub(crate) fn define(module: &mut dyn Module) {
+/// `abort`: the panic functions a call site of kind `SEH_KIND_ABORT + reason` calls, when this
+/// object has such call sites (`None` inside: the lang item doesn't exist, the handler traps).
+pub(crate) fn define(module: &mut dyn Module, abort: Option<&[Option<String>; 2]>) {
     let ptr = module.target_config().pointer_type();
     let call_conv = module.target_config().default_call_conv;
     let sig = |params: &[Type], returns: &[Type]| Signature {
@@ -104,6 +107,13 @@ pub(crate) fn define(module: &mut dyn Module) {
             )
             .unwrap(),
         copy,
+        abort: abort.map(|symbols| {
+            symbols.each_ref().map(|symbol| {
+                symbol.as_ref().map(|symbol| {
+                    module.declare_function(symbol, Linkage::Import, &sig(&[], &[])).unwrap()
+                })
+            })
+        }),
     };
 
     for (func_id, body) in [
@@ -142,6 +152,8 @@ struct Imports {
     heap_alloc: FuncId,
     heap_free: FuncId,
     copy: FuncId,
+    /// See [`define`].
+    abort: Option<[Option<FuncId>; 2]>,
 }
 
 fn call(
@@ -245,13 +257,45 @@ fn define_personality(
 
     bcx.switch_to_block(dispatch_cxx);
     let is_catch = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_CATCH);
-    bcx.ins().brif(
-        is_catch,
-        dispatch_catch,
-        &[],
-        enter_pad,
-        &[BlockArg::Value(rec), BlockArg::Value(zero)],
-    );
+    if let Some(abort) = imports.abort {
+        // A call that must abort without a landing pad: abort here, in the search phase, with
+        // the panic function its terminate pad would call.
+        let dispatch_pad = bcx.create_block();
+        let abort_any = bcx.create_block();
+        let abort_blocks = [bcx.create_block(), bcx.create_block()];
+        bcx.ins().brif(is_catch, dispatch_catch, &[], dispatch_pad, &[]);
+
+        bcx.switch_to_block(dispatch_pad);
+        let is_abort =
+            bcx.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, kind, KIND_ABORT);
+        bcx.ins().brif(
+            is_abort,
+            abort_any,
+            &[],
+            enter_pad,
+            &[BlockArg::Value(rec), BlockArg::Value(zero)],
+        );
+
+        bcx.switch_to_block(abort_any);
+        let in_cleanup = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_ABORT + 1);
+        bcx.ins().brif(in_cleanup, abort_blocks[1], &[], abort_blocks[0], &[]);
+        for (block, func) in abort_blocks.into_iter().zip(abort) {
+            bcx.switch_to_block(block);
+            bcx.set_cold_block(block);
+            if let Some(func) = func {
+                call(module, bcx, func, &[]);
+            }
+            fail(bcx);
+        }
+    } else {
+        bcx.ins().brif(
+            is_catch,
+            dispatch_catch,
+            &[],
+            enter_pad,
+            &[BlockArg::Value(rec), BlockArg::Value(zero)],
+        );
+    }
 
     bcx.switch_to_block(dispatch_catch);
     // null for foreign exceptions: `catch_fn` aborts on them, like LLVM's catch (...) pad.
