@@ -406,6 +406,18 @@ impl<'tcx> HasTargetSpec for FunctionCx<'_, '_, 'tcx> {
 }
 
 impl<'tcx> FunctionCx<'_, '_, 'tcx> {
+    /// `LayoutOf::layout_of` through a cache of the codegen unit's layouts. Codegen asks for the
+    /// same few layouts again and again (each place, operand and constant), and a lookup in this
+    /// map costs a fraction of the query's.
+    pub(crate) fn layout_of(&self, ty: Ty<'tcx>) -> TyAndLayout<'tcx> {
+        if let Some(&layout) = self.constants_cx.layouts.borrow().get(&ty) {
+            return layout;
+        }
+        let layout = LayoutOf::layout_of(self, ty);
+        self.constants_cx.layouts.borrow_mut().insert(ty, layout);
+        layout
+    }
+
     pub(crate) fn monomorphize<T>(&self, value: T) -> T
     where
         T: TypeFoldable<TyCtxt<'tcx>> + Copy,

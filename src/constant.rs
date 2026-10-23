@@ -32,6 +32,8 @@ pub(crate) struct ConstantCx<'tcx> {
     /// The functions whose address some data object of this codegen unit holds (vtables,
     /// function pointers in constants and statics).
     pub(crate) data_func_refs: FxHashSet<FuncId>,
+    /// The layouts the unit's functions asked for (`FunctionCx::layout_of`).
+    pub(crate) layouts: std::cell::RefCell<FxHashMap<Ty<'tcx>, TyAndLayout<'tcx>>>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
