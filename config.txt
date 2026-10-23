@@ -30,6 +30,7 @@ aot.small_mem_copies
 aot.splat_repeat
 aot.backtrace_frames
 aot.probe_unwind
+aot.terminate_calls
 aot.powi_libcall_signature
 aot.codeview
 aot.issue-72793
