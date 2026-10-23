@@ -6,6 +6,7 @@ use cranelift_frontend::Variable;
 use rustc_middle::ty::FnSig;
 use rustc_middle::ty::layout::HasTypingEnv;
 
+use crate::analyze::{SsaField, SsaShape};
 use crate::prelude::*;
 
 fn codegen_field<'tcx>(
@@ -178,19 +179,25 @@ impl<'tcx> CValue<'tcx> {
     ) -> CValue<'tcx> {
         let layout = self.1;
         match self.0 {
-            CValueInner::ByVal(_) => unreachable!(),
-            CValueInner::ByValPair(val1, val2) => match layout.backend_repr {
-                BackendRepr::ScalarPair { .. } => {
-                    let val = match field.as_u32() {
-                        0 => val1,
-                        1 => val2,
-                        _ => bug!("field should be 0 or 1"),
-                    };
-                    let field_layout = layout.field(&*fx, usize::from(field));
-                    CValue::by_val(val, field_layout)
+            CValueInner::ByVal(_) | CValueInner::ByValPair(_, _) => {
+                let in_vars = crate::analyze::ssa_shape(fx, layout)
+                    .and_then(|shape| crate::analyze::ssa_field(fx, shape, layout, field.index()));
+                match (in_vars, self.0) {
+                    (Some((SsaField::Zst, _, field_layout)), _) => CValue::zst(field_layout),
+                    (Some((SsaField::Same, _, field_layout)), inner) => CValue(inner, field_layout),
+                    (Some((SsaField::First, _, field_layout)), CValueInner::ByValPair(val, _))
+                    | (Some((SsaField::Second, _, field_layout)), CValueInner::ByValPair(_, val)) => {
+                        CValue::by_val(val, field_layout)
+                    }
+                    _ => {
+                        // A field that does not line up with the scalars (or a vector's): go
+                        // through memory.
+                        let (ptr, meta) = self.force_stack(fx);
+                        assert!(meta.is_none());
+                        CValue::by_ref(ptr, layout).value_field(fx, field)
+                    }
                 }
-                _ => unreachable!("value_field for ByValPair with abi {:?}", layout.backend_repr),
-            },
+            }
             CValueInner::ByRef(ptr, None) => {
                 let (field_ptr, field_layout) = codegen_field(fx, ptr, None, layout, field);
                 CValue::by_ref(field_ptr, field_layout)
@@ -355,9 +362,21 @@ pub(crate) struct CPlace<'tcx> {
 
 #[derive(Debug, Copy, Clone)]
 enum CPlaceInner {
-    Var(Local, Variable),
-    VarPair(Local, Variable, Variable),
+    /// A scalar in a variable of this type.
+    Var(Local, Variable, Type),
+    /// A pair of scalars in two variables; always a whole local (or a downcast of it, or a field
+    /// that covers both scalars).
+    VarPair(Local, Variable, Variable, VarPairTypes),
     Addr(Pointer, Option<Value>),
+}
+
+/// The types of the two variables of a [`CPlaceInner::VarPair`], and where the second scalar
+/// is in memory.
+#[derive(Debug, Copy, Clone)]
+struct VarPairTypes {
+    a: Type,
+    b: Type,
+    b_offset: Size,
 }
 
 impl<'tcx> CPlace<'tcx> {
@@ -395,8 +414,12 @@ impl<'tcx> CPlace<'tcx> {
         local: Local,
         layout: TyAndLayout<'tcx>,
     ) -> CPlace<'tcx> {
-        let var = fx.bcx.declare_var(fx.clif_type(layout.ty).unwrap());
-        CPlace { inner: CPlaceInner::Var(local, var), layout }
+        let BackendRepr::Scalar(scalar) = layout.backend_repr else {
+            bug!("new_var for non-scalar layout {:?}", layout)
+        };
+        let ty = scalar_to_clif_type(fx.tcx, scalar);
+        let var = fx.bcx.declare_var(ty);
+        CPlace { inner: CPlaceInner::Var(local, var, ty), layout }
     }
 
     pub(crate) fn new_var_pair(
@@ -404,10 +427,17 @@ impl<'tcx> CPlace<'tcx> {
         local: Local,
         layout: TyAndLayout<'tcx>,
     ) -> CPlace<'tcx> {
-        let (ty1, ty2) = fx.clif_pair_type(layout.ty).unwrap();
-        let var1 = fx.bcx.declare_var(ty1);
-        let var2 = fx.bcx.declare_var(ty2);
-        CPlace { inner: CPlaceInner::VarPair(local, var1, var2), layout }
+        let BackendRepr::ScalarPair { a, b, b_offset } = layout.backend_repr else {
+            bug!("new_var_pair for non-scalar-pair layout {:?}", layout)
+        };
+        let types = VarPairTypes {
+            a: scalar_to_clif_type(fx.tcx, a),
+            b: scalar_to_clif_type(fx.tcx, b),
+            b_offset,
+        };
+        let var1 = fx.bcx.declare_var(types.a);
+        let var2 = fx.bcx.declare_var(types.b);
+        CPlace { inner: CPlaceInner::VarPair(local, var1, var2, types), layout }
     }
 
     pub(crate) fn for_ptr(ptr: Pointer, layout: TyAndLayout<'tcx>) -> CPlace<'tcx> {
@@ -425,12 +455,19 @@ impl<'tcx> CPlace<'tcx> {
     pub(crate) fn to_cvalue(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> CValue<'tcx> {
         let layout = self.layout();
         match self.inner {
-            CPlaceInner::Var(_local, var) => {
+            CPlaceInner::Var(_local, var, ty) => {
                 let val = fx.bcx.use_var(var);
                 //fx.bcx.set_val_label(val, cranelift_codegen::ir::ValueLabel::new(var.index()));
+                // A field may read the variable as another scalar type of the same size.
+                let val = match layout.backend_repr {
+                    BackendRepr::Scalar(scalar) if scalar_to_clif_type(fx.tcx, scalar) != ty => {
+                        codegen_bitcast(fx, scalar_to_clif_type(fx.tcx, scalar), val)
+                    }
+                    _ => val,
+                };
                 CValue::by_val(val, layout)
             }
-            CPlaceInner::VarPair(_local, var1, var2) => {
+            CPlaceInner::VarPair(_local, var1, var2, _types) => {
                 let val1 = fx.bcx.use_var(var1);
                 //fx.bcx.set_val_label(val1, cranelift_codegen::ir::ValueLabel::new(var1.index()));
                 let val2 = fx.bcx.use_var(var2);
@@ -449,8 +486,8 @@ impl<'tcx> CPlace<'tcx> {
 
     pub(crate) fn debug_comment(self) -> (&'static str, String) {
         match self.inner {
-            CPlaceInner::Var(_local, var) => ("ssa", format!("var={}", var.index())),
-            CPlaceInner::VarPair(_local, var1, var2) => {
+            CPlaceInner::Var(_local, var, _ty) => ("ssa", format!("var={}", var.index())),
+            CPlaceInner::VarPair(_local, var1, var2, _types) => {
                 ("ssa", format!("var=({}, {})", var1.index(), var2.index()))
             }
             CPlaceInner::Addr(ptr, meta) => {
@@ -476,7 +513,7 @@ impl<'tcx> CPlace<'tcx> {
         match self.inner {
             CPlaceInner::Addr(ptr, None) => ptr,
             CPlaceInner::Addr(_, Some(_)) => bug!("Expected sized cplace, found {:?}", self),
-            CPlaceInner::Var(_, _) | CPlaceInner::VarPair(_, _, _) => {
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => {
                 bug!("Expected CPlace::Addr, found {:?}", self)
             }
         }
@@ -486,7 +523,7 @@ impl<'tcx> CPlace<'tcx> {
     pub(crate) fn to_ptr_unsized(self) -> (Pointer, Value) {
         match self.inner {
             CPlaceInner::Addr(ptr, Some(extra)) => (ptr, extra),
-            CPlaceInner::Addr(_, None) | CPlaceInner::Var(_, _) | CPlaceInner::VarPair(_, _, _) => {
+            CPlaceInner::Addr(_, None) | CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => {
                 bug!("Expected unsized cplace, found {:?}", self)
             }
         }
@@ -503,9 +540,23 @@ impl<'tcx> CPlace<'tcx> {
         }
     }
 
+    /// This place if it is in memory, else a new stack slot holding its current value. Only for
+    /// places that are not used after the memory, like the place of a drop.
+    pub(crate) fn force_memory(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> CPlace<'tcx> {
+        match self.inner {
+            CPlaceInner::Addr(_, _) => self,
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => {
+                let value = self.to_cvalue(fx);
+                let place = CPlace::new_stack_slot(fx, self.layout);
+                place.write_cvalue(fx, value);
+                place
+            }
+        }
+    }
+
     pub(crate) fn try_to_ptr(self) -> Option<Pointer> {
         match self.inner {
-            CPlaceInner::Var(_, _) | CPlaceInner::VarPair(_, _, _) => None,
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => None,
             CPlaceInner::Addr(ptr, None) => Some(ptr),
             CPlaceInner::Addr(_, Some(_)) => bug!("Expected sized cplace, found {:?}", self),
         }
@@ -569,32 +620,36 @@ impl<'tcx> CPlace<'tcx> {
 
         let dst_layout = self.layout();
         match self.inner {
-            CPlaceInner::Var(_local, var) => {
-                let data = match from.1.backend_repr {
-                    BackendRepr::Scalar(_) => CValue(from.0, dst_layout).load_scalar(fx),
+            CPlaceInner::Var(_local, var, dst_ty) => {
+                let flags = MemFlagsData::new().with_notrap();
+                let data = match (from.0, from.1.backend_repr) {
+                    (CValueInner::ByVal(val), BackendRepr::Scalar(_)) => val,
                     _ => {
                         let (ptr, meta) = from.force_stack(fx);
                         assert!(meta.is_none());
-                        CValue(CValueInner::ByRef(ptr, None), dst_layout).load_scalar(fx)
+                        ptr.load(fx, dst_ty, flags)
                     }
                 };
-                let dst_ty = fx.clif_type(self.layout().ty).unwrap();
                 transmute_scalar(fx, var, data, dst_ty);
             }
-            CPlaceInner::VarPair(_local, var1, var2) => {
-                let (data1, data2) = match from.1.backend_repr {
-                    BackendRepr::ScalarPair { .. } => {
-                        CValue(from.0, dst_layout).load_scalar_pair(fx)
-                    }
+            CPlaceInner::VarPair(_local, var1, var2, types) => {
+                let flags = MemFlagsData::new().with_notrap();
+                let (data1, data2) = match (from.0, from.1.backend_repr) {
+                    (
+                        CValueInner::ByValPair(val1, val2),
+                        BackendRepr::ScalarPair { b_offset, .. },
+                    ) if b_offset == types.b_offset => (val1, val2),
                     _ => {
                         let (ptr, meta) = from.force_stack(fx);
                         assert!(meta.is_none());
-                        CValue(CValueInner::ByRef(ptr, None), dst_layout).load_scalar_pair(fx)
+                        let b_offset = Offset32::new(types.b_offset.bytes().try_into().unwrap());
+                        let val1 = ptr.load(fx, types.a, flags);
+                        let val2 = ptr.offset(fx, b_offset).load(fx, types.b, flags);
+                        (val1, val2)
                     }
                 };
-                let (dst_ty1, dst_ty2) = fx.clif_pair_type(self.layout().ty).unwrap();
-                transmute_scalar(fx, var1, data1, dst_ty1);
-                transmute_scalar(fx, var2, data2, dst_ty2);
+                transmute_scalar(fx, var1, data1, types.a);
+                transmute_scalar(fx, var2, data2, types.b);
             }
             CPlaceInner::Addr(_, Some(_)) => bug!("Can't write value to unsized place {:?}", self),
             CPlaceInner::Addr(to_ptr, None) => {
@@ -686,21 +741,42 @@ impl<'tcx> CPlace<'tcx> {
     ) -> CPlace<'tcx> {
         let layout = self.layout();
 
-        if let CPlaceInner::VarPair(local, var1, var2) = self.inner {
-            let layout = layout.field(&*fx, field.index());
-
-            match field.as_u32() {
-                0 => return CPlace { inner: CPlaceInner::Var(local, var1), layout },
-                1 => return CPlace { inner: CPlaceInner::Var(local, var2), layout },
-                _ => unreachable!("field should be 0 or 1"),
-            }
+        let shape = match self.inner {
+            CPlaceInner::Var(_, _, ty) => Some(SsaShape::One(Size::from_bytes(ty.bytes()))),
+            CPlaceInner::VarPair(_, _, _, types) => Some(SsaShape::Pair {
+                a: Size::from_bytes(types.a.bytes()),
+                b_offset: types.b_offset,
+                b: Size::from_bytes(types.b.bytes()),
+            }),
+            CPlaceInner::Addr(_, _) => None,
+        };
+        if let Some(shape) = shape {
+            // `analyze` keeps a local in memory unless each field of it that is used lines up
+            // with its variables.
+            let Some((in_vars, _, field_layout)) =
+                crate::analyze::ssa_field(fx, shape, layout, field.index())
+            else {
+                bug!("field {field:?} of {self:?} is not in its variables")
+            };
+            let inner = match (in_vars, self.inner) {
+                (SsaField::Zst, _) => {
+                    CPlaceInner::Addr(Pointer::dangling(field_layout.align.abi), None)
+                }
+                (SsaField::Same, inner) => inner,
+                (SsaField::First, CPlaceInner::VarPair(local, var1, _, types)) => {
+                    CPlaceInner::Var(local, var1, types.a)
+                }
+                (SsaField::Second, CPlaceInner::VarPair(local, _, var2, types)) => {
+                    CPlaceInner::Var(local, var2, types.b)
+                }
+                _ => unreachable!(),
+            };
+            return CPlace { inner, layout: field_layout };
         }
 
         let (base, extra) = match self.inner {
             CPlaceInner::Addr(ptr, extra) => (ptr, extra),
-            CPlaceInner::Var(_, _) | CPlaceInner::VarPair(_, _, _) => {
-                bug!("Expected CPlace::Addr, found {:?}", self)
-            }
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => unreachable!(),
         };
 
         let (field_ptr, field_layout) = codegen_field(fx, base, extra, layout, field);
@@ -725,8 +801,7 @@ impl<'tcx> CPlace<'tcx> {
         assert!(lane_idx < lane_count);
 
         match self.inner {
-            CPlaceInner::Var(_, _) => unreachable!(),
-            CPlaceInner::VarPair(_, _, _) => unreachable!(),
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => unreachable!(),
             CPlaceInner::Addr(ptr, None) => {
                 let field_offset = lane_layout.size * lane_idx;
                 let field_ptr = ptr.offset_i64(fx, i64::try_from(field_offset.bytes()).unwrap());
@@ -753,8 +828,7 @@ impl<'tcx> CPlace<'tcx> {
         );
 
         match self.inner {
-            CPlaceInner::Var(_, _) => unreachable!(),
-            CPlaceInner::VarPair(_, _, _) => unreachable!(),
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => unreachable!(),
             CPlaceInner::Addr(ptr, None) => {
                 let field_offset = lane_layout.size * lane_idx;
                 let field_ptr = ptr.offset_i64(fx, i64::try_from(field_offset.bytes()).unwrap());
@@ -778,8 +852,7 @@ impl<'tcx> CPlace<'tcx> {
         assert_eq!(lane_layout, value.layout());
 
         match self.inner {
-            CPlaceInner::Var(_, _) => unreachable!(),
-            CPlaceInner::VarPair(_, _, _) => unreachable!(),
+            CPlaceInner::Var(..) | CPlaceInner::VarPair(..) => unreachable!(),
             CPlaceInner::Addr(ptr, None) => {
                 let lane_idx = clif_intcast(fx, lane_idx, fx.pointer_type, false);
                 let field_offset = fx
@@ -803,9 +876,9 @@ impl<'tcx> CPlace<'tcx> {
                 let elem_layout = fx.layout_of(*elem_ty);
                 match self.inner {
                     CPlaceInner::Addr(addr, None) => (elem_layout, addr),
-                    CPlaceInner::Var(_, _)
+                    CPlaceInner::Var(..)
                     | CPlaceInner::Addr(_, Some(_))
-                    | CPlaceInner::VarPair(_, _, _) => bug!("Can't index into {self:?}"),
+                    | CPlaceInner::VarPair(..) => bug!("Can't index into {self:?}"),
                 }
             }
             ty::Slice(elem_ty) => (fx.layout_of(*elem_ty), self.to_ptr_unsized().0),

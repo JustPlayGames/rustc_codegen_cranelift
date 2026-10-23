@@ -826,6 +826,9 @@ pub(crate) fn codegen_drop<'tcx>(
             _ => {
                 assert!(!matches!(drop_instance.def, InstanceKind::Virtual(_, _)));
 
+                // Drop glue takes a reference: a local kept in registers goes to memory now.
+                let drop_place = drop_place.force_memory(fx);
+
                 let fn_abi = FullyMonomorphizedLayoutCx(fx.tcx)
                     .fn_abi_of_instance(drop_instance, ty::List::empty());
 

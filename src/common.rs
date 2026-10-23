@@ -85,25 +85,6 @@ fn clif_type_from_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<types::Typ
     })
 }
 
-fn clif_pair_type_from_ty<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    ty: Ty<'tcx>,
-) -> Option<(types::Type, types::Type)> {
-    Some(match ty.kind() {
-        ty::Tuple(types) if types.len() == 2 => {
-            (clif_type_from_ty(tcx, types[0])?, clif_type_from_ty(tcx, types[1])?)
-        }
-        ty::RawPtr(pointee_ty, _) | ty::Ref(_, pointee_ty, _) => {
-            if tcx.type_has_metadata(*pointee_ty, ty::TypingEnv::fully_monomorphized()) {
-                (pointer_ty(tcx), pointer_ty(tcx))
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    })
-}
-
 pub(crate) fn codegen_icmp_imm(
     fx: &mut FunctionCx<'_, '_, '_>,
     intcc: IntCC,
@@ -360,10 +341,6 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
 
     pub(crate) fn clif_type(&self, ty: Ty<'tcx>) -> Option<Type> {
         clif_type_from_ty(self.tcx, ty)
-    }
-
-    pub(crate) fn clif_pair_type(&self, ty: Ty<'tcx>) -> Option<(Type, Type)> {
-        clif_pair_type_from_ty(self.tcx, ty)
     }
 
     pub(crate) fn get_block(&self, bb: BasicBlock) -> Block {

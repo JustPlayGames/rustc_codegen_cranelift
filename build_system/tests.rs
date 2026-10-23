@@ -129,6 +129,13 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.ssa_adts", &|runner| {
+        // Small ADT locals live in variables at every opt level.
+        runner.run_rustc(["example/ssa_adts.rs", "-Copt-level=0", "--crate-name", "ssa_adts0"]);
+        runner.run_out_command("ssa_adts0", &[]);
+        runner.run_rustc(["example/ssa_adts.rs", "-Copt-level=2", "--crate-name", "ssa_adts2"]);
+        runner.run_out_command("ssa_adts2", &[]);
+    }),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();
