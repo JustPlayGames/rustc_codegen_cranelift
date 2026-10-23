@@ -13,7 +13,10 @@
 //!   Rust panics. It enters a pad with `RtlUnwindEx`, which restores the non-volatile registers
 //!   and passes the pad a pointer to a heap copy of the exception object in `rax`: the original
 //!   lives on the thrower's stack, which the unwind has released. All pads of one unwind share
-//!   one copy, stashed in unused slots of the exception record.
+//!   one copy, stashed in unused slots of the exception record. The search phase clears that
+//!   stash in every frame it passes: a record can reuse the stack slot of an earlier exception's
+//!   record and keep its stash (`RtlRaiseException` dispatches in user mode from a copy that
+//!   writes only the record's parameters), and that stash names a copy its resume freed.
 //! - [`SEH_RESUME`], called at the end of a cleanup pad: it moves the object onto its own stack,
 //!   frees the copy and raises the C++ exception again from there, so the next handler, cranelift
 //!   or C++ (`__CxxFrameHandler3` frames of the LLVM-built standard library), takes it from there.
@@ -238,10 +241,22 @@ fn define_personality(
 
     // Search phase: catch and terminate pads take C++ exceptions only.
     bcx.switch_to_block(dispatch);
-    let is_cleanup = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_CLEANUP);
     let not_cxx_code = bcx.ins().icmp_imm_u(IntCC::NotEqual, code, CXX_EXCEPTION);
-    let skip = bcx.ins().bor(is_cleanup, not_cxx_code);
-    bcx.ins().brif(skip, continue_search, &[], dispatch_cxx, &[]);
+    let dispatch_clear = bcx.create_block();
+    bcx.ins().brif(not_cxx_code, continue_search, &[], dispatch_clear, &[]);
+
+    // A search phase starts a new dispatch of `rec`: drop a stash in it before any pad of this
+    // frame or a frame above can read it. It can be an earlier exception's, whose record had the
+    // same address and whose copy that exception's resume freed (two raises from one resume call
+    // site, e.g. an inlined callee's cleanup and a cleanup of the same frame): `copy` would hand
+    // the freed copy to the next pad, which frees it again (STATUS_HEAP_CORRUPTION). Every frame
+    // whose pads the unwind phase can enter has this handler, so the search phase passes here
+    // before; a catch pad's copy is then the only stash an unwind reads.
+    bcx.switch_to_block(dispatch_clear);
+    let no_stash = bcx.ins().iconst(ptr, 0);
+    store(bcx, no_stash, rec, rec_info(12));
+    let is_cleanup = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_CLEANUP);
+    bcx.ins().brif(is_cleanup, continue_search, &[], dispatch_cxx, &[]);
 
     bcx.switch_to_block(dispatch_cxx);
     let is_catch = bcx.ins().icmp_imm_u(IntCC::Equal, kind, KIND_CATCH);
