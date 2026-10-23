@@ -29,8 +29,11 @@ pub(crate) const MAX_INLINE_BYTES: u64 = 128;
 
 /// Whether the pass runs for this target.
 pub(crate) fn enabled(isa: &dyn cranelift_codegen::isa::TargetIsa) -> bool {
+    // Read once: `emit_vector_copy` asks for every copy it writes, and `getenv` takes a lock and
+    // scans the whole environment.
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     matches!(isa.triple().architecture, Architecture::X86_64 | Architecture::Aarch64(_))
-        && std::env::var_os("CG_CLIF_NO_INLINE_MEMCPY").is_none()
+        && !*DISABLED.get_or_init(|| std::env::var_os("CG_CLIF_NO_INLINE_MEMCPY").is_some())
 }
 
 /// Copies a value of `size` bytes (16 up to [`MAX_INLINE_BYTES`]) with 16-byte vector loads and

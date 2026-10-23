@@ -145,9 +145,7 @@ fn codegen_and_compile_fn<'tcx>(
             .span_fatal(tcx.def_span(instance.def_id()), "Naked asm is not supported in JIT mode");
     }
 
-    cranelift_codegen::timing::set_thread_profiler(Box::new(super::MeasuremeProfiler(
-        tcx.prof.clone(),
-    )));
+    cranelift_codegen::timing::set_thread_profiler(super::pass_profiler(&tcx.prof));
 
     tcx.prof.generic_activity("codegen and compile fn").run(|| {
         let _inst_guard =

@@ -246,9 +246,7 @@ fn compile_cgu(
     kind: ModuleKind,
 ) -> Result<CompiledModule, String> {
     prof.generic_activity_with_arg("compile functions", &*cgu_name).run(|| {
-        cranelift_codegen::timing::set_thread_profiler(Box::new(super::MeasuremeProfiler(
-            prof.clone(),
-        )));
+        cranelift_codegen::timing::set_thread_profiler(super::pass_profiler(prof));
 
         let changed = prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
             crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)

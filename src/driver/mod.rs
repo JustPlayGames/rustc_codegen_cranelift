@@ -53,6 +53,21 @@ fn predefine_mono_items<'tcx>(
 
 struct MeasuremeProfiler(SelfProfilerRef);
 
+/// Cranelift starts about 15 timed passes per function: without `-Zself-profile` nothing records
+/// them, so don't allocate a guard and clone the profiler for each.
+struct NoopProfiler;
+
+impl cranelift_codegen::timing::Profiler for NoopProfiler {
+    fn start_pass(&self, _pass: cranelift_codegen::timing::Pass) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+}
+
+/// The pass profiler for Cranelift on this thread.
+fn pass_profiler(prof: &SelfProfilerRef) -> Box<dyn cranelift_codegen::timing::Profiler> {
+    if prof.enabled() { Box::new(MeasuremeProfiler(prof.clone())) } else { Box::new(NoopProfiler) }
+}
+
 struct TimingGuard {
     profiler: std::mem::ManuallyDrop<SelfProfilerRef>,
     inner: Option<rustc_data_structures::profiling::TimingGuard<'static>>,
