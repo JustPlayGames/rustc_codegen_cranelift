@@ -121,6 +121,9 @@ struct Candidate {
     stack: u32,
     hints: InlineHints,
     frame_dependent: bool,
+    /// Has calls that must abort when they unwind (tagged plain calls, see
+    /// `common::terminate_calls`).
+    terminate_calls: bool,
 }
 
 fn callee_func_id(caller: &ir::Function, func_ref: ir::FuncRef) -> Option<FuncId> {
@@ -194,14 +197,23 @@ impl Inline for Inliner<'_> {
     fn inline(
         &mut self,
         caller: &ir::Function,
-        _call_inst: ir::Inst,
-        _call_opcode: ir::Opcode,
+        call_inst: ir::Inst,
+        call_opcode: ir::Opcode,
         callee: ir::FuncRef,
         _call_args: &[ir::Value],
     ) -> InlineCommand<'_> {
         let Some(id) = callee_func_id(caller, callee) else { return InlineCommand::KeepCall };
         let Some(&idx) = self.index.get(&id) else { return InlineCommand::KeepCall };
         if !self.wants(caller, idx) {
+            return InlineCommand::KeepCall;
+        }
+        // Calls that must abort when they unwind are plain calls with a tag, which inlining
+        // would lose: at such a call site the callee's own calls would be listed as calls that
+        // unwind, and at a `try_call` site the inliner turns the callee's tagged calls into
+        // `try_call`s to the caller's landing pad.
+        if caller.debug_tags.has(call_inst)
+            || (call_opcode == Opcode::TryCall && self.candidates[idx].terminate_calls)
+        {
             return InlineCommand::KeepCall;
         }
         let body = &self.funcs[idx].func;
@@ -235,13 +247,20 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
         .map(|f| {
             if mode == InlineMode::Always && !f.inline_hints.always {
                 // Never inlined in this mode: its size and body don't matter.
-                return Candidate { size: 0, stack: 0, hints: f.inline_hints, frame_dependent: false };
+                return Candidate {
+                    size: 0,
+                    stack: 0,
+                    hints: f.inline_hints,
+                    frame_dependent: false,
+                    terminate_calls: false,
+                };
             }
             Candidate {
                 size: inst_count(&f.func),
                 stack: stack_bytes(&f.func),
                 hints: f.inline_hints,
                 frame_dependent: has_frame_dependent_code(&f.func),
+                terminate_calls: !f.func.debug_tags.is_empty(),
             }
         })
         .collect();
@@ -317,6 +336,7 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
                 candidates[idx].size = inst_count(&funcs[idx].func);
                 candidates[idx].stack = stack_bytes(&funcs[idx].func);
                 candidates[idx].frame_dependent = has_frame_dependent_code(&funcs[idx].func);
+                candidates[idx].terminate_calls = !funcs[idx].func.debug_tags.is_empty();
             }
         }
         done[idx] = true;
