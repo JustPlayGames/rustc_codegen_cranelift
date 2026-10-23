@@ -23,8 +23,12 @@ pub(crate) fn analyze(fx: &FunctionCx<'_, '_, '_>) -> IndexVec<Local, SsaKind> {
 
     for bb in fx.mir.basic_blocks.iter() {
         for stmt in bb.statements.iter() {
+            // Borrowing a place takes the address of its local's memory, unless the place goes
+            // through a pointer (`&*x`, `&(*x).field`, `&raw const (*x.0)[i]`): then the local is
+            // only read for the pointer value and can stay in registers.
             if let Assign(place_and_rval) = &stmt.kind
                 && let Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) = &place_and_rval.1
+                && !place.projection.iter().any(|elem| matches!(elem, PlaceElem::Deref))
             {
                 flag_map[place.local] = SsaKind::NotSsa;
             }
