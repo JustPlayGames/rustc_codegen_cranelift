@@ -53,6 +53,13 @@ pub(crate) fn merge_jump_chains(func: &mut Function) {
                 BlockArg::Value(value) => value,
                 _ => unreachable!("jump with a try_call argument"),
             }));
+            // In a cycle of unreachable blocks a jump can pass the target's own parameter
+            // (`block2: jump block1(v2)` with `block1(v2): jump block2`): aliasing the parameter
+            // to itself would be an alias loop, which resolving aliases later panics on.
+            let target_params = func.dfg.block_params(target);
+            if args.iter().any(|&arg| target_params.contains(&func.dfg.resolve_aliases(arg))) {
+                break;
+            }
             let params = func.dfg.detach_block_params(target);
             for (i, &arg) in args.iter().enumerate() {
                 let param = params.get(i, &func.dfg.value_lists).unwrap();
