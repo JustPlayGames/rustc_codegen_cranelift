@@ -71,6 +71,7 @@ mod inline_asm;
 mod intrinsics;
 mod linkage;
 mod main_shim;
+mod mem_libcalls;
 mod move_forwarding;
 mod num;
 mod optimize;
