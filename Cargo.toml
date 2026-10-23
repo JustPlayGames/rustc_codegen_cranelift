@@ -24,14 +24,14 @@ smallvec = "1.8.1"
 
 # Uncomment to use an unreleased version of cranelift
 [patch.crates-io]
-# The fork's branch cranelift-frameless (Windows x64 try_call and stack probe fixes,
-# relaxable GOT loads on x86-64 ELF, x64 frames without a frame pointer)
-cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
-cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
-cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
-cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
-cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
-cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7132e8ef3f830bc0af6d3120e00544ce19b6058e" }
+# The fork's branch cranelift-trunk-next (Windows x64 unwinding and stack probes, relaxable GOT
+# loads on x86-64 ELF, frames without a frame pointer, anonymous data via section symbols)
+cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
+cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
+cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
+cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
+cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
+cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "0b00772202a10cf070c3d4f528c02e2b67d8f228" }
 #cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
