@@ -117,6 +117,7 @@ pub(crate) fn codegen_fn<'tcx>(
         skipped_stmts: Default::default(), // set by `codegen_fn_prelude`
         caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot,
+        landing_pads: Default::default(),
 
         clif_comments,
         inline_asm: String::new(),

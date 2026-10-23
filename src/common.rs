@@ -277,11 +277,31 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
 
     /// During cleanup the exception pointer will be stored in this variable.
     pub(crate) exception_slot: Variable,
+    /// The blocks unwinding calls land in, one per cleanup block (storing the exception pointer
+    /// and jumping to it) and one per reason to abort, shared by all calls that unwind there.
+    pub(crate) landing_pads: rustc_data_structures::fx::FxHashMap<LandingPad, Block>,
 
     pub(crate) clif_comments: crate::pretty_clif::CommentWriter,
 
     pub(crate) inline_asm: String,
     pub(crate) inline_asm_index: u32,
+}
+
+/// Where an unwinding call lands, see [`FunctionCx::landing_pads`].
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum LandingPad {
+    Cleanup(BasicBlock),
+    Terminate(UnwindTerminateReason),
+}
+
+impl std::hash::Hash for LandingPad {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match *self {
+            LandingPad::Cleanup(block) => block.hash(state),
+            // `UnwindTerminateReason` is a fieldless enum without `Hash`.
+            LandingPad::Terminate(reason) => std::mem::discriminant(&reason).hash(state),
+        }
+    }
 }
 
 impl<'tcx> LayoutOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
