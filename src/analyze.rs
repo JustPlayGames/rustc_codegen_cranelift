@@ -13,11 +13,7 @@ pub(crate) enum SsaKind {
 }
 
 impl SsaKind {
-    pub(crate) fn is_ssa<'tcx>(self, fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> bool {
-        self == SsaKind::MaybeSsa && ssa_shape(fx, fx.layout_of(ty)).is_some()
-    }
-
-    /// `is_ssa` for a type whose layout is at hand.
+    /// Whether a local of this kind and layout is kept in Cranelift variables.
     pub(crate) fn is_ssa_layout<'tcx>(
         self,
         fx: &FunctionCx<'_, '_, 'tcx>,

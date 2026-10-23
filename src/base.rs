@@ -332,20 +332,22 @@ fn verify_func(tcx: TyCtxt<'_>, writer: &crate::pretty_clif::CommentWriter, func
 }
 
 fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
-    let arg_uninhabited = fx
-        .mir
-        .args_iter()
-        .any(|arg| fx.layout_of(fx.monomorphize(fx.mir.local_decls[arg].ty)).is_uninhabited());
-    if arg_uninhabited {
-        fx.bcx.append_block_params_for_function_params(fx.block_map[START_BLOCK]);
-        fx.bcx.switch_to_block(fx.block_map[START_BLOCK]);
-        fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
-        return;
+    // The arguments' layouts, kept for the prelude.
+    let mut arg_layouts = Vec::with_capacity(fx.mir.arg_count);
+    for arg in fx.mir.args_iter() {
+        let layout = fx.layout_of(fx.monomorphize(fx.mir.local_decls[arg].ty));
+        if layout.is_uninhabited() {
+            fx.bcx.append_block_params_for_function_params(fx.block_map[START_BLOCK]);
+            fx.bcx.switch_to_block(fx.block_map[START_BLOCK]);
+            fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
+            return;
+        }
+        arg_layouts.push(layout);
     }
     fx.tcx
         .prof
         .generic_activity("codegen prelude")
-        .run(|| crate::abi::codegen_fn_prelude(fx, start_block));
+        .run(|| crate::abi::codegen_fn_prelude(fx, start_block, arg_layouts));
 
     let reachable_blocks = traversal::mono_reachable_as_bitset(fx.mir, fx.tcx, fx.instance);
     let predecessors = fx.mir.basic_blocks.predecessors();

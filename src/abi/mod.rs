@@ -287,7 +287,12 @@ fn make_local_place<'tcx>(
     place
 }
 
-pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_block: Block) {
+/// `arg_layouts`: the layouts of the MIR arguments, in order.
+pub(crate) fn codegen_fn_prelude<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    start_block: Block,
+    arg_layouts: Vec<TyAndLayout<'tcx>>,
+) {
     fx.bcx.append_block_params_for_function_params(start_block);
 
     fx.bcx.switch_to_block(start_block);
@@ -295,11 +300,18 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         fx.bcx.ins().nop();
     }
 
+    let mut arg_layouts = arg_layouts.into_iter();
     fx.local_layouts = fx
         .mir
         .local_decls
-        .iter()
-        .map(|decl| fx.layout_of(fx.monomorphize(decl.ty)))
+        .iter_enumerated()
+        .map(|(local, decl)| {
+            if local != RETURN_PLACE && local.as_usize() <= fx.mir.arg_count {
+                arg_layouts.next().unwrap()
+            } else {
+                fx.layout_of(fx.monomorphize(decl.ty))
+            }
+        })
         .collect();
 
     let ssa_analyzed = crate::analyze::analyze(fx);
@@ -331,7 +343,7 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
         .mir
         .args_iter()
         .map(|local| {
-            let arg_ty = fx.monomorphize(fx.mir.local_decls[local].ty);
+            let arg_ty = fx.local_layouts[local].ty;
 
             // FIXME(splat): un-tuple splatted arguments in codegen, for performance
             // Adapted from https://github.com/rust-lang/rust/blob/145155dc96757002c7b2e9de8489416e2fdbbd57/src/librustc_codegen_llvm/mir/mod.rs#L442-L482
@@ -354,15 +366,15 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
                     params.push(param);
                 }
 
-                (local, ArgKind::Spread(params), arg_ty)
+                (local, ArgKind::Spread(params))
             } else {
                 let arg_abi = arg_abis_iter.next().unwrap();
                 let param =
                     cvalue_for_param(fx, Some(local), None, arg_abi, &mut block_params_iter);
-                (local, ArgKind::Normal(param), arg_ty)
+                (local, ArgKind::Normal(param))
             }
         })
-        .collect::<Vec<(Local, ArgKind<'tcx>, Ty<'tcx>)>>();
+        .collect::<Vec<(Local, ArgKind<'tcx>)>>();
 
     assert!(fx.caller_location.is_none());
     if fx.instance.def.requires_caller_location(fx.tcx) {
@@ -382,7 +394,7 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     self::comments::add_locals_header_comment(fx);
 
     let debug_vars = crate::analyze::debug_variable_locals(fx);
-    for (local, arg_kind, ty) in func_params {
+    for (local, arg_kind) in func_params {
         // While this is normally an optimization to prevent an unnecessary copy when an argument is
         // not mutated by the current function, this is necessary to support unsized arguments.
         // Arguments the debugger shows get a stack slot of their own (`debug_variable_locals`).
@@ -407,8 +419,8 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
             continue;
         }
 
-        let layout = fx.layout_of(ty);
-        let is_ssa = ssa_analyzed[local].is_ssa(fx, ty);
+        let layout = fx.local_layouts[local];
+        let is_ssa = ssa_analyzed[local].is_ssa_layout(fx, layout);
         let place = make_local_place(fx, local, layout, is_ssa);
         assert_eq!(fx.local_map.push(place), local);
 
