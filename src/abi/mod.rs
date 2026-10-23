@@ -941,7 +941,8 @@ fn fill_landing_pad(fx: &mut FunctionCx<'_, '_, '_>, span: Span, key: LandingPad
     let exception_ptr = fx.bcx.append_block_param(block, fx.pointer_type);
     match key {
         LandingPad::Cleanup(cleanup) => {
-            fx.bcx.def_var(fx.exception_slot, exception_ptr);
+            let slot = fx.exception_slot();
+            slot.store(fx, exception_ptr, MemFlagsData::trusted());
             let cleanup_block = fx.get_block(cleanup);
             fx.bcx.ins().jump(cleanup_block, &[]);
         }

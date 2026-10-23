@@ -96,8 +96,6 @@ pub(crate) fn codegen_fn<'tcx>(
         None
     };
 
-    let exception_slot = bcx.declare_var(pointer_type);
-
     let mut fx = FunctionCx {
         module,
         debug_context,
@@ -118,7 +116,7 @@ pub(crate) fn codegen_fn<'tcx>(
         local_map: IndexVec::with_capacity(mir.local_decls.len()),
         skipped_stmts: Default::default(), // set by `codegen_fn_prelude`
         caller_location: None,             // set by `codegen_fn_prelude`
-        exception_slot,
+        exception_slot: None,
         landing_pads: Default::default(),
         func_refs: Default::default(),
 
@@ -680,7 +678,8 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
             }
             TerminatorKind::UnwindResume => {
                 if cfg!(feature = "unwinding") {
-                    let exception_ptr = fx.bcx.use_var(fx.exception_slot);
+                    let exception_ptr =
+                        fx.exception_slot().load(fx, fx.pointer_type, MemFlagsData::trusted());
                     let resume = if crate::debuginfo::uses_seh_runtime(fx.module.isa().triple()) {
                         crate::debuginfo::SEH_RESUME
                     } else {
