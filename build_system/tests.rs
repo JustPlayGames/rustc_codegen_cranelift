@@ -115,6 +115,7 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         ]);
         runner.run_out_command("inline_calls2", &[]);
     }),
+    TestCase::build_bin_and_run("aot.simd_vector_ops", "example/simd_vector_ops.rs", &[]),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();

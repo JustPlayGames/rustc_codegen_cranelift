@@ -22,6 +22,7 @@ aot.float-minmax-pass
 aot.stack_slot_sharing
 aot.move_forwarding
 aot.inline_calls
+aot.simd_vector_ops
 aot.powi_libcall_signature
 aot.issue-72793
 aot.issue-59326
