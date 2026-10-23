@@ -78,6 +78,7 @@ mod num;
 mod optimize;
 mod pointer;
 mod pretty_clif;
+mod regalloc_choice;
 mod seh_runtime;
 mod stack_slot_sharing;
 mod toolchain;
@@ -355,6 +356,7 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
     if let Some(algorithm) = BackendConfig::from_opts(&sess.opts.cg.llvm_args)
         .ok()
         .and_then(|config| config.regalloc_algorithm)
+        .filter(|algorithm| algorithm != "mixed")
     {
         flags_builder.set("regalloc_algorithm", &algorithm).unwrap();
     }

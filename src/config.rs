@@ -14,7 +14,9 @@ pub struct BackendConfig {
     /// Register allocator algorithm to use instead of Cranelift's default (`backtracking`).
     ///
     /// Defaults to `None`. Can be set using `-Cllvm-args=regalloc=single_pass`, which compiles
-    /// faster at the cost of more spills and moves in the generated code.
+    /// faster at the cost of more spills and moves in the generated code, or
+    /// `-Cllvm-args=regalloc=backtracking`. `-Cllvm-args=regalloc=mixed` picks one per function
+    /// (see `regalloc_choice`), the default without optimizations.
     pub regalloc_algorithm: Option<String>,
 }
 
@@ -45,7 +47,7 @@ impl BackendConfig {
             }
             if let Some(algorithm) = opt.strip_prefix("regalloc=") {
                 match algorithm {
-                    "backtracking" | "single_pass" => {
+                    "backtracking" | "single_pass" | "mixed" => {
                         config.regalloc_algorithm = Some(algorithm.to_owned());
                     }
                     _ => return Err(format!("Unknown register allocator `{}`", algorithm)),
