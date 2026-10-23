@@ -33,6 +33,7 @@ pub(crate) struct CodegenedFunction {
     func_debug_cx: Option<FunctionDebugContext>,
     inline_asm: String,
     pub(crate) inline_hints: crate::inline::InlineHints,
+    regalloc: crate::regalloc_choice::Hint,
 }
 
 pub(crate) fn codegen_fn<'tcx>(
@@ -164,6 +165,8 @@ pub(crate) fn codegen_fn<'tcx>(
         has_inline_asm: !inline_asm.is_empty(),
     };
 
+    let regalloc = crate::regalloc_choice::hint(tcx, instance, inline_hints.cold);
+
     CodegenedFunction {
         symbol_name,
         func_id,
@@ -172,6 +175,7 @@ pub(crate) fn codegen_fn<'tcx>(
         func_debug_cx,
         inline_asm,
         inline_hints,
+        regalloc,
     }
 }
 
@@ -195,6 +199,8 @@ pub(crate) fn compile_fn(
     let context = cached_context;
     context.clear();
     context.func = codegened_func.func;
+    let algorithm = crate::regalloc_choice::choose(codegened_func.regalloc, &context.func);
+    context.func.params.set_regalloc_algorithm(algorithm);
 
     #[cfg(false)]
     let _clif_guard = {
