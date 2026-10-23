@@ -761,22 +761,20 @@ fn codegen_regular_intrinsic_call<'tcx>(
         sym::volatile_load | sym::unaligned_volatile_load => {
             intrinsic_args!(fx, args => (ptr); intrinsic);
 
-            // Cranelift treats loads as volatile by default
             // FIXME correctly handle unaligned_volatile_load
             let inner_layout = fx.layout_of(ptr.layout().ty.builtin_deref(true).unwrap());
-            let val = CValue::by_ref(Pointer::new(ptr.load_scalar(fx)), inner_layout);
+            let ptr = Pointer::new(ptr.load_scalar(fx));
+            let val = volatile_load(fx, ptr, inner_layout);
             ret.write_cvalue(fx, val);
         }
         sym::volatile_store | sym::unaligned_volatile_store | sym::nontemporal_store => {
             intrinsic_args!(fx, args => (ptr, val); intrinsic);
             let ptr = ptr.load_scalar(fx);
 
-            // Cranelift treats stores as volatile by default
             // FIXME correctly handle unaligned_volatile_store
             // FIXME actually do nontemporal stores if requested (but do not just emit MOVNT on x86;
             // see the LLVM backend for details)
-            let dest = CPlace::for_ptr(Pointer::new(ptr), val.layout());
-            dest.write_cvalue(fx, val);
+            volatile_store(fx, Pointer::new(ptr), val);
         }
 
         sym::ptr_offset_from | sym::ptr_offset_from_unsigned => {
@@ -1601,4 +1599,69 @@ fn codegen_regular_intrinsic_call<'tcx>(
     let ret_block = fx.get_block(destination.unwrap());
     fx.bcx.ins().jump(ret_block, &[]);
     Ok(())
+}
+
+/// Loads a value for `read_volatile` right away. The loads may trap (no `notrap` flag), so
+/// Cranelift never removes them, not even when the value is unused (as after inlining
+/// `read_volatile` into a caller that ignores it) or loaded again.
+fn volatile_load<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    ptr: Pointer,
+    layout: TyAndLayout<'tcx>,
+) -> CValue<'tcx> {
+    let flags = MemFlagsData::new();
+    match layout.backend_repr {
+        _ if layout.is_zst() => CValue::zst(layout),
+        BackendRepr::Scalar(scalar) => {
+            let val = ptr.load(fx, scalar_to_clif_type(fx.tcx, scalar), flags);
+            CValue::by_val(val, layout)
+        }
+        BackendRepr::ScalarPair { a, b, b_offset } => {
+            let b_offset = i64::try_from(b_offset.bytes()).unwrap();
+            let val1 = ptr.load(fx, scalar_to_clif_type(fx.tcx, a), flags);
+            let val2 = ptr.offset_i64(fx, b_offset).load(fx, scalar_to_clif_type(fx.tcx, b), flags);
+            CValue::by_val_pair(val1, val2, layout)
+        }
+        BackendRepr::SimdVector { element, count } => {
+            let ty = scalar_to_clif_type(fx.tcx, element).by(count.as_u32()).unwrap();
+            CValue::by_val(ptr.load(fx, ty, flags), layout)
+        }
+        _ => {
+            // Copy into a stack slot of our own with trapping loads.
+            let place = CPlace::new_stack_slot(fx, layout);
+            let src = ptr.get_addr(fx);
+            let dst = place.to_ptr().get_addr(fx);
+            let align = layout.align.bytes().try_into().unwrap_or(128);
+            fx.bcx.emit_small_memory_copy(
+                fx.target_config,
+                dst,
+                src,
+                layout.size.bytes(),
+                align,
+                align,
+                true,
+                flags,
+            );
+            place.to_cvalue(fx)
+        }
+    }
+}
+
+/// Stores a value for `write_volatile`, with stores that may trap like [`volatile_load`]'s loads.
+fn volatile_store<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, ptr: Pointer, val: CValue<'tcx>) {
+    let flags = MemFlagsData::new();
+    let layout = val.layout();
+    match layout.backend_repr {
+        _ if layout.is_zst() => {}
+        BackendRepr::Scalar(_) | BackendRepr::SimdVector { .. } => {
+            let val = val.load_scalar(fx);
+            ptr.store(fx, val, flags);
+        }
+        BackendRepr::ScalarPair { b_offset, .. } => {
+            let (val1, val2) = val.load_scalar_pair(fx);
+            ptr.store(fx, val1, flags);
+            ptr.offset_i64(fx, i64::try_from(b_offset.bytes()).unwrap()).store(fx, val2, flags);
+        }
+        _ => CPlace::for_ptr(ptr, layout).write_cvalue(fx, val),
+    }
 }
