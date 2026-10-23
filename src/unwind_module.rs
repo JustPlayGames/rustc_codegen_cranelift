@@ -108,12 +108,14 @@ impl<T: Module> Module for UnwindModule<T> {
 
     fn define_function_bytes(
         &mut self,
-        _func_id: FuncId,
-        _alignment: u64,
-        _bytes: &[u8],
-        _relocs: &[ModuleReloc],
+        func_id: FuncId,
+        alignment: u64,
+        bytes: &[u8],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        unimplemented!()
+        // Only for code that needs no unwind info: a jump to another function (see
+        // `create_wrapper_function`), which never has a frame of its own.
+        self.module.define_function_bytes(func_id, alignment, bytes, relocs)
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {

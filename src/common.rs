@@ -224,6 +224,24 @@ pub(crate) fn create_wrapper_function(
     let wrapper_func_id = module.declare_function(wrapper_name, Linkage::Export, &sig).unwrap();
     let callee_func_id = module.declare_function(callee_name, Linkage::Import, &sig).unwrap();
 
+    // On x86_64 the wrapper is a single `jmp` to the callee, as LLVM's tail call makes it: the
+    // allocator shims (`__rust_alloc` and friends) run on every allocation, and a call + return
+    // there costs a frame, a second return address and four instructions instead of one. The jump
+    // leaves the caller's frame and return address as they are, so the wrapper needs no unwind
+    // info (a leaf without stack, for SEH as for DWARF unwinders).
+    if module.isa().triple().architecture == target_lexicon::Architecture::X86_64 {
+        use cranelift_codegen::binemit::Reloc;
+        use cranelift_module::ModuleReloc;
+        let kind = if module.isa().triple().binary_format == target_lexicon::BinaryFormat::Elf {
+            Reloc::X86CallPLTRel4
+        } else {
+            Reloc::X86CallPCRel4
+        };
+        let reloc = ModuleReloc { offset: 1, kind, name: callee_func_id.into(), addend: -4 };
+        module.define_function_bytes(wrapper_func_id, 16, &[0xe9, 0, 0, 0, 0], &[reloc]).unwrap();
+        return;
+    }
+
     let mut ctx = Context::new();
     ctx.func.signature = sig;
     {
