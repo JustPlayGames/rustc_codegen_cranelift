@@ -93,6 +93,7 @@ impl<T: Module> Module for UnwindModule<T> {
         ctx: &mut Context,
         ctrl_plane: &mut ControlPlane,
     ) -> ModuleResult<()> {
+        mark_colocated(self.module.isa(), &mut ctx.func);
         self.module.define_function_with_control_plane(func, ctx, ctrl_plane)?;
         self.unwind_context.add_function(&mut self.module, func, ctx);
         Ok(())
@@ -110,5 +111,61 @@ impl<T: Module> Module for UnwindModule<T> {
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {
         self.module.define_data(data_id, data)
+    }
+}
+
+/// Lets references to other functions and statics skip the GOT where the linker can resolve them
+/// directly, as LLVM does for Rust code (x86_64 only).
+///
+/// `cranelift_module` only marks references to symbols defined in the same object as colocated,
+/// so every call to another codegen unit or crate loads the callee's address from the GOT and
+/// calls it indirectly. On ELF that is a GOT entry per callee in every executable (the
+/// `R_X86_64_GOTPCREL` loads are not relaxable); on COFF, which has no GOT, every such reference
+/// gets its own `.refptr` stub section in each object.
+///
+/// - ELF: calls become direct `call`s with `R_X86_64_PLT32`, which the linker resolves to the
+///   callee, or to a PLT entry when the callee lives in a shared library. Taking a function's
+///   address and statics keep the GOT, which is always valid in position-independent code.
+/// - COFF: every non-TLS reference becomes a direct rel32 reference (`build_isa` turns `is_pic`
+///   off for COFF, so colocated symbols get a RIP-relative `lea`): a PE image is at most 2 GiB and
+///   functions imported from a DLL are called through their import library's thunk. Statics
+///   imported from a DLL need `__imp_` references, which this backend never emitted (the
+///   `.refptr` stub pointed at the static itself).
+pub(crate) fn mark_colocated(isa: &dyn TargetIsa, func: &mut cranelift_codegen::ir::Function) {
+    use cranelift_codegen::entity::EntityRef;
+    use cranelift_codegen::ir::{ExternalName, GlobalValueData, InstructionData};
+
+    let triple = isa.triple();
+    if triple.architecture != target_lexicon::Architecture::X86_64 {
+        return;
+    }
+    let coff = triple.binary_format == target_lexicon::BinaryFormat::Coff;
+    if !coff && triple.binary_format != target_lexicon::BinaryFormat::Elf {
+        return;
+    }
+
+    let mut address_taken = vec![false; func.dfg.ext_funcs.len()];
+    if !coff {
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                if let InstructionData::FuncAddr { func_ref, .. } = func.dfg.insts[inst] {
+                    address_taken[func_ref.index()] = true;
+                }
+            }
+        }
+    }
+    for (func_ref, ext_func) in func.dfg.ext_funcs.iter_mut() {
+        if matches!(ext_func.name, ExternalName::User(_) | ExternalName::LibCall(_))
+            && !address_taken[func_ref.index()]
+        {
+            ext_func.colocated = true;
+        }
+    }
+    if coff {
+        for global_value in func.global_values.values_mut() {
+            if let GlobalValueData::Symbol { colocated, tls: false, .. } = global_value {
+                *colocated = true;
+            }
+        }
     }
 }
