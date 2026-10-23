@@ -280,9 +280,11 @@ impl CodegenBackend for CraneliftCodegenBackend {
 /// Returns true when `-Zverify-llvm-ir` is passed, the `CG_CLIF_ENABLE_VERIFIER` env var is set to
 /// 1 or when cg_clif is compiled with debug assertions enabled or false otherwise.
 fn enable_verifier(sess: &Session) -> bool {
+    // Read once: this is asked for every function.
+    static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     sess.verify_llvm_ir()
         || cfg!(debug_assertions)
-        || env::var("CG_CLIF_ENABLE_VERIFIER").as_deref() == Ok("1")
+        || *ENV.get_or_init(|| env::var("CG_CLIF_ENABLE_VERIFIER").as_deref() == Ok("1"))
 }
 
 fn target_tuple(sess: &Session) -> target_lexicon::Triple {
