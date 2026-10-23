@@ -27,6 +27,10 @@ smallvec = "1.8.1"
 # object's writer with hashbrown's hasher instead of SipHash for its symbol map and string
 # tables (vendor/object, see its README-PATCH.md); the files it writes are unchanged.
 object = { path = "vendor/object" }
+# The fork's branch clif-speed (regalloc2 0.15.2 with cheaper per-function setup: the dominator
+# tree only for SSA validation, register trees and spill slot lists cleared in place, operands
+# read once); the allocations it makes are unchanged.
+regalloc2 = { git = "https://github.com/JustPlayGames/regalloc2.git", rev = "34813c2bfd8a886c77c9e719081d69eefb02562a" }
 # The fork's branch cranelift-trunk-40 (Windows x64 unwinding and stack probes, relaxable GOT
 # loads on x86-64 ELF, frames without a frame pointer, anonymous data via section symbols, volatile
 # accesses kept as written, Windows x64 register preferences, a register allocator per function)
