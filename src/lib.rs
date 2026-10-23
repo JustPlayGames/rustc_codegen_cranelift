@@ -294,6 +294,11 @@ fn build_isa(sess: &Session, jit: bool) -> Arc<dyn TargetIsa + 'static> {
     flags_builder
         .set("preserve_frame_pointers", if preserve_frame_pointer { "true" } else { "false" })
         .unwrap();
+    // Where frame pointers may be omitted, functions that don't need one get none (as with LLVM):
+    // four instructions less per call.
+    flags_builder
+        .set("omit_frame_pointers", if preserve_frame_pointer { "false" } else { "true" })
+        .unwrap();
 
     let tls_model = match target_tuple.binary_format {
         BinaryFormat::Elf => "elf_gd",
