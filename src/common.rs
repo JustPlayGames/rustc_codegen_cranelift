@@ -1,5 +1,5 @@
 use cranelift_codegen::isa::TargetFrontendConfig;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use rustc_abi::{Float, Integer, Primitive};
 use rustc_index::IndexVec;
 use rustc_middle::ty::TypeFoldable;
@@ -275,8 +275,9 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     /// When `#[track_caller]` is used, the implicit caller location is stored in this variable.
     pub(crate) caller_location: Option<CValue<'tcx>>,
 
-    /// During cleanup the exception pointer will be stored in this variable.
-    pub(crate) exception_slot: Variable,
+    /// During cleanup the exception pointer is kept in this stack slot (see
+    /// [`FunctionCx::exception_slot`]).
+    pub(crate) exception_slot: Option<Pointer>,
     /// The blocks unwinding calls land in, one per cleanup block (storing the exception pointer
     /// and jumping to it) and one per reason to abort, shared by all calls that unwind there.
     pub(crate) landing_pads: rustc_data_structures::fx::FxHashMap<LandingPad, Block>,
@@ -373,6 +374,21 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
         *self.local_map.get(local).unwrap_or_else(|| {
             panic!("Local {:?} doesn't exist", local);
         })
+    }
+
+    /// The stack slot the landing pads store the exception pointer in, for the `UnwindResume`
+    /// that ends their cleanup. Memory rather than an SSA variable: a variable became a block
+    /// parameter of every cleanup block that more than one landing pad reaches and stayed live
+    /// across the cleanup's drop calls, all register allocation work for a path that only runs
+    /// while unwinding.
+    pub(crate) fn exception_slot(&mut self) -> Pointer {
+        if let Some(slot) = self.exception_slot {
+            return slot;
+        }
+        let size = self.pointer_type.bytes();
+        let slot = self.create_stack_slot(size, size);
+        self.exception_slot = Some(slot);
+        slot
     }
 
     pub(crate) fn create_stack_slot(&mut self, size: u32, align: u32) -> Pointer {
