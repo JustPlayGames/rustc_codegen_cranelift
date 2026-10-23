@@ -277,6 +277,21 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.folded_functions", &|runner| {
+        // Functions with the same Cranelift IR share one compiled copy; calls, pointers, vtables,
+        // drop glue and unwinding through the others keep working.
+        for (opt, debuginfo) in [("0", "0"), ("2", "0"), ("0", "2")] {
+            let name = format!("folded_functions{opt}{debuginfo}");
+            runner.run_rustc([
+                "example/folded_functions.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cdebuginfo={debuginfo}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
