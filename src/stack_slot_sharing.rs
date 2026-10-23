@@ -57,17 +57,21 @@ impl BitSet {
         }
         changed
     }
-    fn contains(&self, i: usize) -> bool {
-        self.0[i / 64] & (1 << (i % 64)) != 0
-    }
     fn intersects(&self, other: &BitSet) -> bool {
         self.0.iter().zip(&other.0).any(|(a, b)| a & b != 0)
     }
-    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0.iter().enumerate().flat_map(|(w, &word)| {
-            (0..64).filter(move |b| word & (1 << b) != 0).map(move |b| w * 64 + b)
-        })
-    }
+}
+
+/// The indices of the set bits of `word`, lowest first.
+fn set_bits(mut word: u64) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        if word == 0 {
+            return None;
+        }
+        let b = word.trailing_zeros() as usize;
+        word &= word - 1;
+        Some(b)
+    })
 }
 
 pub(crate) fn analyze<'tcx>(
@@ -176,7 +180,7 @@ pub(crate) fn analyze<'tcx>(
     let predecessors = mir.basic_blocks.predecessors();
     while let Some(bb) = worklist.pop() {
         queued[bb] = false;
-        let live = block_live_in(mir, bb, &index_of, &live_in, |_, _| {});
+        let live = block_live_in(mir, bb, &index_of, n, &live_in, |_, _| {});
         if live.0 != live_in[bb].0 {
             live_in[bb] = live;
             for &pred in &predecessors[bb] {
@@ -190,45 +194,55 @@ pub(crate) fn analyze<'tcx>(
 
     // Where each candidate occupies its slot.
     let mut live_at: Vec<BitSet> = (0..n).map(|_| BitSet::new(points)).collect();
-    let mut value_live_at = BitSet::new(n);
+    let words = n.div_ceil(64);
+    // Storage liveness before each statement of the current block (row i = before statement i,
+    // the last row before the terminator), reused across blocks.
+    let mut storage_at: Vec<u64> = vec![];
+    let mut mentioned: Vec<Vec<usize>> = vec![];
+    // Forwarded sources by block.
+    let mut skipped_in: IndexVec<BasicBlock, Vec<(usize, usize)>> =
+        IndexVec::from_elem_n(vec![], mir.basic_blocks.len());
+    for &(loc, src) in &forwarding.skipped {
+        if let Some(c) = index_of[src] {
+            skipped_in[loc.block].push((loc.statement_index, c));
+        }
+    }
     for (bb, data) in mir.basic_blocks.iter_enumerated() {
-        // Value liveness before each statement of the block, from the end.
-        let mut value_live: Vec<BitSet> = Vec::with_capacity(data.statements.len() + 1);
-        let mut mentioned: Vec<Vec<usize>> = vec![vec![]; data.statements.len() + 1];
-        block_live_in(mir, bb, &index_of, &live_in, |_, live| {
-            value_live.push(BitSet(live.0.clone()));
-        });
-        value_live.reverse();
+        let rows = data.statements.len() + 1;
+        storage_at.clear();
+        let mut storage = BitSet(entry[bb].0.clone());
+        for i in 0..rows {
+            storage_at.extend_from_slice(&storage.0);
+            if let Some(stmt) = data.statements.get(i) {
+                apply(&stmt.kind, &index_of, &mut storage);
+            }
+        }
+        mentioned.clear();
+        mentioned.resize(rows, vec![]);
         collect_mentions(mir, bb, &index_of, &mut mentioned);
         // A forwarded source's memory is the call's argument: it is in use from its move to the
         // call, although its value is dead after the move.
-        for &(loc, src) in &forwarding.skipped {
-            if loc.block == bb
-                && let Some(c) = index_of[src]
-            {
-                for m in &mut mentioned[loc.statement_index..] {
-                    m.push(c);
-                }
+        for &(statement_index, c) in &skipped_in[bb] {
+            for m in &mut mentioned[statement_index..] {
+                m.push(c);
             }
         }
-
-        let mut storage = BitSet(entry[bb].0.clone());
-        let mut point = block_start[bb];
-        for i in 0..=data.statements.len() {
-            value_live_at.0.clone_from(&value_live[i].0);
-            for c in storage.iter() {
-                if borrowed.contains(c) || value_live_at.contains(c) {
-                    live_at[c].insert(point);
+        let start = block_start[bb];
+        // Value liveness before each statement of the block, from the end: a candidate occupies
+        // its slot where its storage is live and it is borrowed or its value is live.
+        block_live_in(mir, bb, &index_of, n, &live_in, |i, value_live| {
+            let point = start + i;
+            let storage = &storage_at[i * words..(i + 1) * words];
+            for (w, ((&s, &v), &b)) in storage.iter().zip(&value_live.0).zip(&borrowed.0).enumerate()
+            {
+                for bit in set_bits(s & (v | b)) {
+                    live_at[w * 64 + bit].insert(point);
                 }
             }
             for &c in &mentioned[i] {
                 live_at[c].insert(point);
             }
-            if let Some(stmt) = data.statements.get(i) {
-                apply(&stmt.kind, &index_of, &mut storage);
-            }
-            point += 1;
-        }
+        });
     }
 
     // Greedy: largest locals first, each into the first slot it doesn't interfere with.
@@ -281,12 +295,13 @@ fn block_live_in<'tcx>(
     mir: &rustc_middle::mir::Body<'tcx>,
     bb: BasicBlock,
     index_of: &IndexVec<Local, Option<usize>>,
+    n: usize,
     live_in: &IndexVec<BasicBlock, BitSet>,
     mut each: impl FnMut(usize, &BitSet),
 ) -> BitSet {
     let data = &mir.basic_blocks[bb];
     let terminator = data.terminator();
-    let mut live = BitSet::new(index_of.iter().flatten().count());
+    let mut live = BitSet::new(n);
     // A call's destination is written on the return edge only: it stays live if another
     // successor (the unwind edge) still needs its old value.
     let (return_target, destination) = match &terminator.kind {
