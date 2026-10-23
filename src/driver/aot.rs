@@ -232,6 +232,14 @@ fn compile_cgu(
             crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)
         });
 
+        if crate::mem_libcalls::enabled(aot_module.module.isa()) {
+            prof.generic_activity_with_arg("inline small memcpys", &*cgu_name).run(|| {
+                for codegened_func in &mut aot_module.codegened_functions {
+                    crate::mem_libcalls::inline_small_mem_libcalls(&mut codegened_func.func);
+                }
+            });
+        }
+
         let mut cached_context = Context::new();
         for codegened_func in aot_module.codegened_functions {
             crate::base::compile_fn(

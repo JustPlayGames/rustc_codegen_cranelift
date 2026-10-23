@@ -136,6 +136,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         runner.run_rustc(["example/ssa_adts.rs", "-Copt-level=2", "--crate-name", "ssa_adts2"]);
         runner.run_out_command("ssa_adts2", &[]);
     }),
+    TestCase::custom("aot.small_mem_copies", &|runner| {
+        // Constant-size memcpy/memmove/memset become loads and stores at every opt level.
+        for opt in ["0", "2"] {
+            let name = format!("small_mem_copies{opt}");
+            runner.run_rustc([
+                "example/small_mem_copies.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.powi_libcall_signature", &|runner| {
         let mut cmd = runner.rustc_command(["example/powi-libcall-signature.rs"]);
         let output = cmd.output().unwrap();

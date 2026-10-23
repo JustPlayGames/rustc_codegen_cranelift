@@ -25,6 +25,7 @@ aot.inline_calls
 aot.simd_vector_ops
 aot.volatile_unused
 aot.ssa_adts
+aot.small_mem_copies
 aot.powi_libcall_signature
 aot.issue-72793
 aot.issue-59326
