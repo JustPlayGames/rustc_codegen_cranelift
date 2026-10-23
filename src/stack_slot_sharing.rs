@@ -14,7 +14,8 @@
 //! it, so that a destination never shares memory with an operand of the same statement. Two
 //! locals share a slot when they never occupy at the same program point. Locals without
 //! `StorageLive` (always live), SSA locals, arguments and the return place are left alone. Like
-//! LLVM, this only runs when optimizing, so debug builds keep one slot per local for debuggers.
+//! LLVM, with full debuginfo this only runs when optimizing, so debug builds that describe
+//! variables keep one slot per local for debuggers.
 
 use rustc_index::IndexVec;
 use rustc_middle::mir::visit::{MutatingUseContext, PlaceContext, Visitor};
@@ -80,9 +81,10 @@ pub(crate) fn analyze<'tcx>(
         groups: vec![],
     };
     // Without optimizations a debugger may show a local whose memory another one reuses, so
-    // locals keep slots of their own then, unless there is no debuginfo to show them with.
+    // locals keep slots of their own then, unless the debuginfo describes no variables (line
+    // tables only, or none).
     if fx.tcx.sess.opts.optimize == rustc_session::config::OptLevel::No
-        && fx.tcx.sess.opts.debuginfo != rustc_session::config::DebugInfo::None
+        && fx.tcx.sess.opts.debuginfo == rustc_session::config::DebugInfo::Full
     {
         return sharing;
     }
