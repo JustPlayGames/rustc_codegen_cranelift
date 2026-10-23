@@ -136,6 +136,7 @@ pub(crate) fn codegen_inline_asm_terminator<'tcx>(
                             }
                             GlobalAlloc::Memory(alloc) => {
                                 let data_id = crate::constant::data_id_for_alloc_id(
+                                    fx.tcx,
                                     &mut fx.constants_cx,
                                     fx.module,
                                     alloc_id,

@@ -21,6 +21,11 @@ use crate::prelude::*;
 pub(crate) struct ConstantCx {
     todo: Vec<TodoItem>,
     anon_allocs: FxHashMap<AllocId, DataId>,
+    /// Immutable allocations by their interned contents (the address of their `Allocation`):
+    /// allocations with the same contents share one data object, as LLVM merges identical
+    /// constants. Different `AllocId`s often have the same contents (a string literal or
+    /// constant used in several places).
+    alloc_contents: FxHashMap<usize, DataId>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -31,7 +36,11 @@ enum TodoItem {
 
 impl ConstantCx {
     pub(crate) fn new() -> Self {
-        ConstantCx { todo: vec![], anon_allocs: FxHashMap::default() }
+        ConstantCx {
+            todo: vec![],
+            anon_allocs: FxHashMap::default(),
+            alloc_contents: FxHashMap::default(),
+        }
     }
 
     /// Defines the allocations used since the last call.
@@ -162,6 +171,7 @@ pub(crate) fn codegen_const_value<'tcx>(
                             fx.bcx.ins().iconst(fx.pointer_type, alloc.inner().align.bytes() as i64)
                         } else {
                             let data_id = data_id_for_alloc_id(
+                                fx.tcx,
                                 &mut fx.constants_cx,
                                 fx.module,
                                 alloc_id,
@@ -249,8 +259,13 @@ pub(crate) fn codegen_const_value<'tcx>(
 
 fn pointer_for_allocation<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, alloc_id: AllocId) -> Value {
     let alloc = fx.tcx.global_alloc(alloc_id).unwrap_memory();
-    let data_id =
-        data_id_for_alloc_id(&mut fx.constants_cx, fx.module, alloc_id, alloc.inner().mutability);
+    let data_id = data_id_for_alloc_id(
+        fx.tcx,
+        &mut fx.constants_cx,
+        fx.module,
+        alloc_id,
+        alloc.inner().mutability,
+    );
 
     let local_data_id = fx.module.declare_data_in_func(data_id, fx.bcx.func);
     if fx.clif_comments.enabled() {
@@ -260,16 +275,35 @@ fn pointer_for_allocation<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, alloc_id: All
 }
 
 pub(crate) fn data_id_for_alloc_id(
+    tcx: TyCtxt<'_>,
     cx: &mut ConstantCx,
     module: &mut dyn Module,
     alloc_id: AllocId,
     mutability: rustc_hir::Mutability,
 ) -> DataId {
-    *cx.anon_allocs.entry(alloc_id).or_insert_with(|| {
-        // Defined by the next `finalize`, once for the codegen unit.
-        cx.todo.push(TodoItem::Alloc(alloc_id));
-        module.declare_anonymous_data(mutability.is_mut(), false).unwrap()
-    })
+    if let Some(&data_id) = cx.anon_allocs.get(&alloc_id) {
+        return data_id;
+    }
+    let contents = match (mutability, tcx.global_alloc(alloc_id)) {
+        (Mutability::Not, GlobalAlloc::Memory(alloc))
+            if alloc.inner().mutability == Mutability::Not =>
+        {
+            Some(alloc.inner() as *const _ as usize)
+        }
+        _ => None,
+    };
+    if let Some(&data_id) = contents.and_then(|contents| cx.alloc_contents.get(&contents)) {
+        cx.anon_allocs.insert(alloc_id, data_id);
+        return data_id;
+    }
+    // Defined by the next `finalize`, once for the codegen unit.
+    cx.todo.push(TodoItem::Alloc(alloc_id));
+    let data_id = module.declare_anonymous_data(mutability.is_mut(), false).unwrap();
+    cx.anon_allocs.insert(alloc_id, data_id);
+    if let Some(contents) = contents {
+        cx.alloc_contents.insert(contents, data_id);
+    }
+    data_id
 }
 
 pub(crate) fn data_id_for_vtable<'tcx>(
@@ -280,7 +314,7 @@ pub(crate) fn data_id_for_vtable<'tcx>(
     trait_ref: Option<ExistentialTraitRef<'tcx>>,
 ) -> DataId {
     let alloc_id = tcx.vtable_allocation((ty, trait_ref));
-    data_id_for_alloc_id(cx, module, alloc_id, Mutability::Not)
+    data_id_for_alloc_id(tcx, cx, module, alloc_id, Mutability::Not)
 }
 
 pub(crate) fn pointer_for_anonymous_str(fx: &mut FunctionCx<'_, '_, '_>, msg: &str) -> Value {
@@ -405,7 +439,6 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                         unreachable!()
                     }
                 };
-                // FIXME: should we have a cache so we don't do this multiple times for the same `ConstAllocation`?
                 let data_id = *cx.anon_allocs.entry(alloc_id).or_insert_with(|| {
                     module.declare_anonymous_data(alloc.inner().mutability.is_mut(), false).unwrap()
                 });
@@ -462,7 +495,7 @@ fn define_all_allocs(tcx: TyCtxt<'_>, module: &mut dyn Module, cx: &mut Constant
                     continue;
                 }
                 GlobalAlloc::Memory(target_alloc) => {
-                    data_id_for_alloc_id(cx, module, alloc_id, target_alloc.inner().mutability)
+                    data_id_for_alloc_id(tcx, cx, module, alloc_id, target_alloc.inner().mutability)
                 }
                 GlobalAlloc::VTable(ty, dyn_ty) => data_id_for_vtable(
                     tcx,
