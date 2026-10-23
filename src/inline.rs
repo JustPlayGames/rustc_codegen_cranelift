@@ -224,21 +224,27 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
     if mode == InlineMode::Off || funcs.len() < 2 {
         return;
     }
+    // Nothing to do when no function could be inlined.
+    if mode == InlineMode::Always && !funcs.iter().any(|f| f.inline_hints.always) {
+        return;
+    }
     let index: FxHashMap<FuncId, usize> =
         funcs.iter().enumerate().map(|(i, f)| (f.func_id, i)).collect();
     let mut candidates: Vec<Candidate> = funcs
         .iter()
-        .map(|f| Candidate {
-            size: inst_count(&f.func),
-            stack: stack_bytes(&f.func),
-            hints: f.inline_hints,
-            frame_dependent: has_frame_dependent_code(&f.func),
+        .map(|f| {
+            if mode == InlineMode::Always && !f.inline_hints.always {
+                // Never inlined in this mode: its size and body don't matter.
+                return Candidate { size: 0, stack: 0, hints: f.inline_hints, frame_dependent: false };
+            }
+            Candidate {
+                size: inst_count(&f.func),
+                stack: stack_bytes(&f.func),
+                hints: f.inline_hints,
+                frame_dependent: has_frame_dependent_code(&f.func),
+            }
         })
         .collect();
-    // Nothing to do when no function could be inlined.
-    if mode == InlineMode::Always && !candidates.iter().any(|c| c.hints.always) {
-        return;
-    }
 
     // Post-order over the call graph (iterative DFS), so callees come before their callers.
     let n = funcs.len();
@@ -277,7 +283,14 @@ pub(crate) fn inline_cgu(mode: InlineMode, funcs: &mut [CodegenedFunction]) {
     let mut done = vec![false; n];
     let mut ctx = cranelift_codegen::Context::new();
     for idx in order {
-        if callees[idx].iter().any(|&c| c != idx) {
+        // Without optimizations only `#[inline(always)]` callees are taken: a caller with none
+        // has nothing to inline, so don't walk its body.
+        let has_callee = if mode == InlineMode::Always {
+            callees[idx].iter().any(|&c| c != idx && candidates[c].hints.always)
+        } else {
+            callees[idx].iter().any(|&c| c != idx)
+        };
+        if has_callee {
             ctx.clear();
             ctx.func = std::mem::replace(&mut funcs[idx].func, ir::Function::new());
             let caller_start = candidates[idx].size;
