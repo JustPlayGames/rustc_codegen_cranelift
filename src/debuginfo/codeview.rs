@@ -27,6 +27,7 @@ const S_FRAMEPROC: u16 = 0x1012;
 const S_OBJNAME: u16 = 0x1101;
 const S_GPROC32: u16 = 0x1110;
 const S_COMPILE3: u16 = 0x113c;
+const S_UDT: u16 = 0x1108;
 const S_LOCAL: u16 = 0x113e;
 const S_DEFRANGE_FRAMEPOINTER_REL: u16 = 0x1142;
 const S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE: u16 = 0x1144;
@@ -341,7 +342,8 @@ impl CodeViewUnit {
                 });
                 for local in &func.locals {
                     record(out, S_LOCAL, |r| {
-                        r.extend_from_slice(&local.type_index.to_le_bytes());
+                        let ty = self.types.complete_type(local.type_index);
+                        r.extend_from_slice(&ty.to_le_bytes());
                         let flags = if local.is_param { CV_LVARFLAG_ISPARAM } else { 0 };
                         r.extend_from_slice(&flags.to_le_bytes());
                         cstr(r, local.name.as_bytes());
@@ -395,6 +397,19 @@ impl CodeViewUnit {
                         // linenumStart (24 bits), deltaLineEnd (7 bits) = 0, fStatement = 1
                         out.extend_from_slice(&(line.line | 0x8000_0000).to_le_bytes());
                     }
+                }
+            });
+        }
+
+        // A user-defined type symbol for every complete aggregate and enum, as LLVM writes: they
+        // keep the complete records in link.exe's PDB and let debuggers find types by name.
+        if !self.types.udts.is_empty() {
+            subsection(&mut out, DEBUG_S_SYMBOLS, |out| {
+                for (name, ty) in &self.types.udts {
+                    record(out, S_UDT, |r| {
+                        r.extend_from_slice(&ty.to_le_bytes());
+                        cstr(r, truncate(name, 4000).as_bytes());
+                    });
                 }
             });
         }
