@@ -33,15 +33,49 @@ pub(crate) fn maybe_known_branch_taken(
 ) -> Option<bool> {
     let ValueDef::Result(arg_inst, 0) = bcx.func.dfg.value_def(arg) else { return None };
 
-    match bcx.func.dfg.insts[arg_inst] {
-        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => {
-            if test_zero {
-                Some(imm.bits() == 0)
-            } else {
-                Some(imm.bits() != 0)
-            }
+    let nonzero = match bcx.func.dfg.insts[arg_inst] {
+        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => imm.bits() != 0,
+        // A compare of two constants: monomorphization made both sides known (lane counts and
+        // sizes of generic code, `cfg!`-like consts), so only one side of the branch is ever
+        // taken. Folding it here lets Cranelift drop the other side as unreachable.
+        InstructionData::IntCompare { opcode: Opcode::Icmp, cond, args: [a, b] } => {
+            let ty = bcx.func.dfg.value_type(a);
+            eval_icmp(cond, ty.bits(), known_iconst(bcx, a)?, known_iconst(bcx, b)?)
         }
+        _ => return None,
+    };
+    Some(if test_zero { !nonzero } else { nonzero })
+}
+
+fn known_iconst(bcx: &FunctionBuilder<'_>, v: Value) -> Option<i64> {
+    let ValueDef::Result(inst, 0) = bcx.func.dfg.value_def(v) else { return None };
+    match bcx.func.dfg.insts[inst] {
+        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(imm.bits()),
         _ => None,
+    }
+}
+
+/// `a cond b` for `bits`-wide integers (at most 64 bits) given as raw immediates.
+fn eval_icmp(cond: IntCC, bits: u32, a: i64, b: i64) -> bool {
+    let (ua, ub) = if bits >= 64 {
+        (a as u64, b as u64)
+    } else {
+        let mask = (1u64 << bits) - 1;
+        (a as u64 & mask, b as u64 & mask)
+    };
+    let sext = |x: u64| if bits >= 64 { x as i64 } else { ((x << (64 - bits)) as i64) >> (64 - bits) };
+    let (sa, sb) = (sext(ua), sext(ub));
+    match cond {
+        IntCC::Equal => ua == ub,
+        IntCC::NotEqual => ua != ub,
+        IntCC::UnsignedLessThan => ua < ub,
+        IntCC::UnsignedLessThanOrEqual => ua <= ub,
+        IntCC::UnsignedGreaterThan => ua > ub,
+        IntCC::UnsignedGreaterThanOrEqual => ua >= ub,
+        IntCC::SignedLessThan => sa < sb,
+        IntCC::SignedLessThanOrEqual => sa <= sb,
+        IntCC::SignedGreaterThan => sa > sb,
+        IntCC::SignedGreaterThanOrEqual => sa >= sb,
     }
 }
 
