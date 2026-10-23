@@ -27,6 +27,7 @@ extern crate rustc_span;
 extern crate rustc_structures;
 extern crate rustc_symbol_mangling;
 extern crate rustc_target;
+extern crate rustc_thread_pool;
 
 // This prevents duplicating functions and statics that are already part of the host rustc process.
 #[allow(unused_extern_crates)]
@@ -236,7 +237,26 @@ impl CodegenBackend for CraneliftCodegenBackend {
             #[cfg(not(feature = "jit"))]
             tcx.dcx().fatal("jit support was disabled when compiling rustc_codegen_cranelift");
         } else {
-            Box::new(rustc_codegen_ssa::base::codegen_crate(driver::aot::AotDriver, tcx))
+            let threads = tcx.sess.opts.jobs.frontend.map_or(1, |threads| threads.get());
+            if threads > 1 {
+                let prefetch = std::sync::Arc::new(driver::aot::Prefetch::default());
+                let driver = driver::aot::AotDriver { prefetch: Some(prefetch.clone()) };
+                let (ongoing_codegen, ()) = rustc_data_structures::sync::par_join(
+                    || {
+                        let _finish = driver::aot::FinishPrefetch(&prefetch);
+                        rustc_data_structures::sync::IntoDynSyncSend(
+                            rustc_codegen_ssa::base::codegen_crate(driver, tcx),
+                        )
+                    },
+                    || prefetch.run(tcx, threads),
+                );
+                Box::new(ongoing_codegen.0)
+            } else {
+                Box::new(rustc_codegen_ssa::base::codegen_crate(
+                    driver::aot::AotDriver::default(),
+                    tcx,
+                ))
+            }
         }
     }
 
