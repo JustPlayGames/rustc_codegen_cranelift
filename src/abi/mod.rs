@@ -12,7 +12,7 @@ use cranelift_codegen::ir::{
     SigRef,
 };
 use cranelift_codegen::isa::CallConv;
-use cranelift_module::ModuleError;
+use cranelift_module::{FuncOrDataId, ModuleError};
 use rustc_abi::{CanonAbi, ExternAbi, X86Call};
 use rustc_codegen_ssa::base::is_call_from_compiler_builtins_to_upstream_monomorphization;
 use rustc_codegen_ssa::diagnostics::CompilerBuiltinsCannotCall;
@@ -130,6 +130,13 @@ pub(crate) fn import_function<'tcx>(
     inst: Instance<'tcx>,
 ) -> FuncId {
     let name = tcx.symbol_name(inst).name;
+    // A function of this codegen unit is declared already (`predefine_mono_items`), with this
+    // signature.
+    if let Some(FuncOrDataId::Func(func_id)) = module.get_name(name)
+        && module.declarations().get_function_decl(func_id).linkage != Linkage::Import
+    {
+        return func_id;
+    }
     let sig = get_function_sig(tcx, module.target_config().default_call_conv, inst);
     declare_import_function(tcx, module, name, &sig)
 }
