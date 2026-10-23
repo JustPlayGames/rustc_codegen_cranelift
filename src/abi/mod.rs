@@ -29,6 +29,7 @@ use self::pass_mode::*;
 pub(crate) use self::returning::codegen_return;
 use crate::base::codegen_unwind_terminate;
 use crate::debuginfo::{EXCEPTION_HANDLER_CLEANUP, EXCEPTION_HANDLER_TERMINATE};
+use crate::common::LandingPad;
 use crate::prelude::*;
 
 struct ArgValue<'tcx> {
@@ -871,6 +872,41 @@ pub(crate) enum CallTarget {
     Indirect(SigRef, Value),
 }
 
+/// The block a call with this unwind action lands in when it unwinds, taking the exception
+/// pointer, and whether it is new (and still has to be filled with [`fill_landing_pad`]). One
+/// per cleanup block and one per reason to abort for the whole function, as LLVM does: a block
+/// of its own per call made a function's code, blocks and LSDA grow with every call that can
+/// unwind. Sealed with all blocks at the end of the function, since later calls can land there
+/// too.
+fn landing_pad(fx: &mut FunctionCx<'_, '_, '_>, unwind: UnwindAction) -> (LandingPad, Block, bool) {
+    let key = match unwind {
+        UnwindAction::Cleanup(cleanup) => LandingPad::Cleanup(cleanup),
+        UnwindAction::Terminate(reason) => LandingPad::Terminate(reason),
+        UnwindAction::Continue | UnwindAction::Unreachable => unreachable!(),
+    };
+    if let Some(&block) = fx.landing_pads.get(&key) {
+        return (key, block, false);
+    }
+    let block = fx.bcx.create_block();
+    fx.landing_pads.insert(key, block);
+    (key, block, true)
+}
+
+/// Emits a new landing pad; leaves the builder in it.
+fn fill_landing_pad(fx: &mut FunctionCx<'_, '_, '_>, span: Span, key: LandingPad, block: Block) {
+    fx.bcx.switch_to_block(block);
+    fx.bcx.set_cold_block(block);
+    let exception_ptr = fx.bcx.append_block_param(block, fx.pointer_type);
+    match key {
+        LandingPad::Cleanup(cleanup) => {
+            fx.bcx.def_var(fx.exception_slot, exception_ptr);
+            let cleanup_block = fx.get_block(cleanup);
+            fx.bcx.ins().jump(cleanup_block, &[]);
+        }
+        LandingPad::Terminate(reason) => codegen_unwind_terminate(fx, span, reason),
+    }
+}
+
 pub(crate) fn codegen_call_with_unwind_action(
     fx: &mut FunctionCx<'_, '_, '_>,
     span: Span,
@@ -931,20 +967,17 @@ pub(crate) fn codegen_call_with_unwind_action(
                 target_block.unwrap_or(fallthrough_block),
                 &fallthrough_block_call_args,
             );
-            let pre_cleanup_block = fx.bcx.create_block();
-            let pre_cleanup_block_call =
-                fx.bcx.func.dfg.block_call(pre_cleanup_block, &[BlockArg::TryCallExn(0)]);
             let tag = match unwind {
                 UnwindAction::Terminate(_) => EXCEPTION_HANDLER_TERMINATE,
                 _ => EXCEPTION_HANDLER_CLEANUP,
             };
+            let (landing_pad_key, landing_pad, new_landing_pad) = landing_pad(fx, unwind);
+            let landing_pad_call =
+                fx.bcx.func.dfg.block_call(landing_pad, &[BlockArg::TryCallExn(0)]);
             let exception_table = fx.bcx.func.dfg.exception_tables.push(ExceptionTableData::new(
                 sig_ref,
                 fallthrough_block_call,
-                [ExceptionTableItem::Tag(
-                    ExceptionTag::with_number(tag).unwrap(),
-                    pre_cleanup_block_call,
-                )],
+                [ExceptionTableItem::Tag(ExceptionTag::with_number(tag).unwrap(), landing_pad_call)],
             ));
 
             match func_ref {
@@ -955,25 +988,8 @@ pub(crate) fn codegen_call_with_unwind_action(
                     fx.bcx.ins().try_call_indirect(func_ptr, call_args, exception_table);
                 }
             }
-
-            fx.bcx.seal_block(pre_cleanup_block);
-            fx.bcx.switch_to_block(pre_cleanup_block);
-            fx.bcx.set_cold_block(pre_cleanup_block);
-            match unwind {
-                UnwindAction::Continue | UnwindAction::Unreachable => unreachable!(),
-                UnwindAction::Cleanup(cleanup) => {
-                    let exception_ptr =
-                        fx.bcx.append_block_param(pre_cleanup_block, fx.pointer_type);
-                    fx.bcx.def_var(fx.exception_slot, exception_ptr);
-                    let cleanup_block = fx.get_block(cleanup);
-                    fx.bcx.ins().jump(cleanup_block, &[]);
-                }
-                UnwindAction::Terminate(reason) => {
-                    // FIXME dedup terminate blocks
-                    fx.bcx.append_block_param(pre_cleanup_block, fx.pointer_type);
-
-                    codegen_unwind_terminate(fx, span, reason);
-                }
+            if new_landing_pad {
+                fill_landing_pad(fx, span, landing_pad_key, landing_pad);
             }
 
             if target_block.is_none() {
