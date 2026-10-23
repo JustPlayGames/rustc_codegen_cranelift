@@ -151,30 +151,7 @@ impl CodeViewUnit {
         if self.file_map.contains_key(&file_id) {
             return;
         }
-        let absolute = |p: &[u8]| {
-            p.first() == Some(&b'/') || p.first() == Some(&b'\\') || (p.len() > 1 && p[1] == b':')
-        };
-        // Built on Windows, the paths are Windows paths: use one separator style throughout.
-        let windows =
-            self.comp_dir.contains(&b'\\') || (self.comp_dir.len() > 1 && self.comp_dir[1] == b':');
-        let sep = if windows { b'\\' } else { b'/' };
-        let mut path = Vec::new();
-        if !absolute(dir) && !absolute(name) && !self.comp_dir.is_empty() {
-            path.extend_from_slice(&self.comp_dir);
-            path.push(sep);
-        }
-        if !dir.is_empty() && !absolute(name) {
-            path.extend_from_slice(dir);
-            path.push(sep);
-        }
-        path.extend_from_slice(name);
-        if windows {
-            for b in &mut path {
-                if *b == b'/' {
-                    *b = b'\\';
-                }
-            }
-        }
+        let path = full_path(&self.comp_dir, dir, name);
 
         let (checksum_kind, checksum) = match sf.src_hash.kind {
             SourceFileHashAlgorithm::Md5 => (CHKSUM_TYPE_MD5, sf.src_hash.hash_bytes().to_vec()),
@@ -454,6 +431,70 @@ impl CodeViewUnit {
                 .unwrap();
         }
     }
+}
+
+fn is_absolute(p: &[u8]) -> bool {
+    p.first() == Some(&b'/') || p.first() == Some(&b'\\') || (p.len() > 1 && p[1] == b':')
+}
+
+/// The path of a source file as the file checksum table names it, built as LLVM's
+/// `CodeViewDebug::getFullFilepath` does: a Unix path is kept as it is, anything else is a Windows
+/// path with backslashes only and no `.`, `..` or doubled separators. Debuggers take the file
+/// name after the last backslash: with a slash left in, cdb never finds `bp file.rs:line`.
+fn full_path(comp_dir: &[u8], dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut full_dir = Vec::new();
+    if !is_absolute(dir) && !comp_dir.is_empty() {
+        full_dir.extend_from_slice(comp_dir);
+    }
+    if !dir.is_empty() {
+        if !full_dir.is_empty() && !matches!(full_dir.last(), Some(b'/' | b'\\')) {
+            full_dir.push(if full_dir.contains(&b'\\') { b'\\' } else { b'/' });
+        }
+        full_dir.extend_from_slice(dir);
+    }
+    let dir = &full_dir[..];
+
+    if dir.first() == Some(&b'/') || name.first() == Some(&b'/') {
+        if name.first() == Some(&b'/') || dir.is_empty() {
+            return name.to_vec();
+        }
+        let mut path = dir.to_vec();
+        if path.last() != Some(&b'/') {
+            path.push(b'/');
+        }
+        path.extend_from_slice(name);
+        return path;
+    }
+
+    let mut path = Vec::new();
+    if (name.len() > 1 && name[1] == b':') || dir.is_empty() {
+        path.extend_from_slice(name);
+    } else {
+        path.extend_from_slice(dir);
+        path.push(b'\\');
+        path.extend_from_slice(name);
+    }
+    // Canonicalize textually, as LLVM: the files may not exist where this runs.
+    let path: Vec<u8> = path.into_iter().map(|b| if b == b'/' { b'\\' } else { b }).collect();
+    let mut parts: Vec<&[u8]> = Vec::new();
+    let leading = path.iter().take_while(|&&b| b == b'\\').count().min(2);
+    for part in path[leading..].split(|&b| b == b'\\') {
+        match part {
+            b"" | b"." => {}
+            b".." if parts.last().is_some_and(|p| *p != b".." && !p.ends_with(b":")) => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    let mut out = vec![b'\\'; leading];
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\\');
+        }
+        out.extend_from_slice(part);
+    }
+    out
 }
 
 pub(super) fn truncate(s: &str, max: usize) -> &str {
