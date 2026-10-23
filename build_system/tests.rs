@@ -185,6 +185,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.small_switches", &|runner| {
+        // Matches with up to three targets as compares and branches (no jump table).
+        for opt in ["0", "2"] {
+            let name = format!("small_switches{opt}");
+            runner.run_rustc([
+                "example/small_switches.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.probe_unwind", &|runner| {
         // Unwinding from inside stack probes (a stack overflow, a profiler's signal).
         for opt in ["0", "2"] {
