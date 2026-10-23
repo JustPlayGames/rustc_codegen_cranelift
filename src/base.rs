@@ -358,7 +358,10 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
             fx.bcx.set_cold_block(block);
         }
 
-        fx.bcx.ins().nop();
+        if fx.clif_comments.enabled() {
+            // Something for the statements' comments to attach to (see `codegen_stmt`).
+            fx.bcx.ins().nop();
+        }
         for (statement_index, stmt) in bb_data.statements.iter().enumerate() {
             if !fx.skipped_stmts.is_empty()
                 && fx.skipped_stmts.contains(&Location { block: bb, statement_index })
@@ -427,7 +430,9 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
                 };
 
                 fx.bcx.switch_to_block(failure);
-                fx.bcx.ins().nop();
+                if fx.clif_comments.enabled() {
+                    fx.bcx.ins().nop();
+                }
 
                 match &**msg {
                     AssertKind::BoundsCheck { len, index } => {
@@ -994,7 +999,9 @@ fn codegen_stmt<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, cur_block: Block, stmt:
                         fx.bcx.ins().jump(loop_block, &[index.into()]);
 
                         fx.bcx.switch_to_block(done_block);
-                        fx.bcx.ins().nop();
+                        if fx.clif_comments.enabled() {
+                            fx.bcx.ins().nop();
+                        }
                     }
                 }
                 Rvalue::Aggregate(ref kind, ref operands)
@@ -1308,8 +1315,8 @@ fn codegen_panic_call<'tcx>(
         fx.add_comment(func_ref, format!("{:?}", symbol_name));
     }
 
-    let nop_inst = fx.bcx.ins().nop();
     if fx.clif_comments.enabled() {
+        let nop_inst = fx.bcx.ins().nop();
         fx.add_comment(nop_inst, format!("panic {}", symbol_name));
     }
 

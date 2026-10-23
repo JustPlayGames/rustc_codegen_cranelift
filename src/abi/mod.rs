@@ -284,7 +284,9 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     fx.bcx.append_block_params_for_function_params(start_block);
 
     fx.bcx.switch_to_block(start_block);
-    fx.bcx.ins().nop();
+    if fx.clif_comments.enabled() {
+        fx.bcx.ins().nop();
+    }
 
     fx.local_layouts = fx
         .mir
