@@ -29,17 +29,20 @@ impl GccExceptTable {
 
             // Note: The offset in classInfoOffset is relative to position right after classInfoOffset
             // itself.
-            let class_info_offset_no_padding = self.call_sites.encoded_size()
-                + self.actions.encoded_size()
-                + self.type_info.encoded_size(encoding);
+            // Each table's size is computed once: the padding search below asks for it up to
+            // four times, and a function's call site table can have thousands of entries.
+            let call_sites_size = self.call_sites.encoded_size();
+            let actions_size = self.actions.encoded_size();
+            let class_info_offset_no_padding =
+                call_sites_size + actions_size + self.type_info.encoded_size(encoding);
 
             let type_info_is_aligned = |type_info_padding: u64| {
                 (class_info_offset_field_offset
                     + gimli::leb128::write::uleb128_size(
                         class_info_offset_no_padding + type_info_padding,
                     ) as u64
-                    + self.call_sites.encoded_size()
-                    + self.actions.encoded_size()
+                    + call_sites_size
+                    + actions_size
                     + type_info_padding)
                     .is_multiple_of(4)
             };
@@ -119,14 +122,17 @@ impl CallSiteTable {
         self.1 = true;
     }
 
+    fn table_length(&self) -> u64 {
+        self.0.iter().map(|call_site| call_site.encoded_size()).sum()
+    }
+
     fn encoded_size(&self) -> u64 {
-        let mut len = LenWriter(0);
-        self.write(&mut len).unwrap();
-        len.0 as u64
+        let table_length = self.table_length();
+        1 + gimli::leb128::write::uleb128_size(table_length) as u64 + table_length
     }
 
     fn write<W: Writer>(&self, w: &mut W) -> gimli::write::Result<()> {
-        let callsite_table_length = self.0.iter().map(|call_site| call_site.encoded_size()).sum();
+        let callsite_table_length = self.table_length();
 
         // callsiteEncoding
         w.write_u8(DW_EH_PE_uleb128.0)?;
@@ -150,9 +156,12 @@ pub(super) struct CallSite {
 
 impl CallSite {
     fn encoded_size(&self) -> u64 {
-        let mut len = LenWriter(0);
-        self.write(&mut len).unwrap();
-        len.0 as u64
+        use gimli::leb128::write::uleb128_size;
+        (uleb128_size(self.start)
+            + uleb128_size(self.length)
+            + uleb128_size(self.landing_pad)
+            + uleb128_size(self.action_entry.map_or(0, |action_offset| action_offset.0 + 1)))
+            as u64
     }
 
     fn write<W: Writer>(&self, w: &mut W) -> gimli::write::Result<()> {
@@ -288,6 +297,16 @@ impl Writer for LenWriter {
 
     fn write(&mut self, bytes: &[u8]) -> gimli::write::Result<()> {
         self.0 += bytes.len();
+        Ok(())
+    }
+
+    fn write_uleb128(&mut self, val: u64) -> gimli::write::Result<()> {
+        self.0 += gimli::leb128::write::uleb128_size(val);
+        Ok(())
+    }
+
+    fn write_sleb128(&mut self, val: i64) -> gimli::write::Result<()> {
+        self.0 += gimli::leb128::write::sleb128_size(val);
         Ok(())
     }
 
