@@ -201,6 +201,8 @@ pub(crate) fn compile_fn(
     context.func = codegened_func.func;
     let algorithm = crate::regalloc_choice::choose(codegened_func.regalloc, &context.func);
     context.func.params.set_regalloc_algorithm(algorithm);
+    prof.generic_activity("merge jump chains")
+        .run(|| crate::merge_blocks::merge_jump_chains(&mut context.func));
 
     #[cfg(false)]
     let _clif_guard = {
