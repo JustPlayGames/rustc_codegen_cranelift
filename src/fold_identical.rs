@@ -25,9 +25,21 @@ use rustc_data_structures::fx::{FxHashMap, FxHasher};
 use crate::base::CodegenedFunction;
 use crate::prelude::*;
 
+/// A hash of the parts of the IR that tell functions apart (equal IR, equal hash); `same`
+/// compares all of it. Hashing the whole `FunctionStencil` (its layout's links, value lists,
+/// side tables) cost more than the comparisons of the few functions that share this one.
 fn stencil_hash(f: &CodegenedFunction) -> u64 {
+    use cranelift_codegen::entity::EntityRef;
+    use cranelift_codegen::ir::{Inst, Value};
     let mut hasher = FxHasher::default();
-    f.func.stencil.hash(&mut hasher);
+    let dfg = &f.func.dfg;
+    for i in 0..dfg.num_insts() {
+        dfg.insts[Inst::new(i)].hash(&mut hasher, &dfg.value_lists);
+    }
+    for v in 0..dfg.num_values() {
+        dfg.value_type(Value::new(v)).hash(&mut hasher);
+    }
+    f.func.signature.hash(&mut hasher);
     f.regalloc.hash(&mut hasher);
     hasher.finish()
 }
