@@ -134,19 +134,14 @@ fn callee_func_id(caller: &ir::Function, func_ref: ir::FuncRef) -> Option<FuncId
     }
 }
 
+/// The functions `func` imports, before any inlining: those it calls, and the few whose address
+/// it takes (cg_clif imports a function once per function, at its first use). Reading the
+/// imports instead of walking every instruction of the codegen unit.
 fn direct_callees(func: &ir::Function, out: &mut Vec<FuncId>) {
     out.clear();
-    for block in func.layout.blocks() {
-        for inst in func.layout.block_insts(block) {
-            match func.dfg.insts[inst] {
-                InstructionData::Call { func_ref, .. }
-                | InstructionData::TryCall { func_ref, .. } => {
-                    if let Some(id) = callee_func_id(func, func_ref) {
-                        out.push(id);
-                    }
-                }
-                _ => {}
-            }
+    for func_ref in func.dfg.ext_funcs.keys() {
+        if let Some(id) = callee_func_id(func, func_ref) {
+            out.push(id);
         }
     }
 }
