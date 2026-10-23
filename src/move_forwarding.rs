@@ -50,9 +50,8 @@ pub(crate) fn analyze<'tcx>(
     CountUses(&mut uses).visit_body(mir);
 
     let is_memory = |local: Local| {
-        let ty = fx.monomorphize(mir.local_decls[local].ty);
-        let layout = fx.layout_of(ty);
-        !ssa[local].is_ssa(fx, ty) && layout.is_sized() && layout.size.bytes() > 0
+        let layout = fx.local_layouts[local];
+        !ssa[local].is_ssa_layout(fx, layout) && layout.is_sized() && layout.size.bytes() > 0
     };
 
     for (bb, data) in mir.basic_blocks.iter_enumerated() {

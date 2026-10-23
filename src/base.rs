@@ -115,6 +115,7 @@ pub(crate) fn codegen_fn<'tcx>(
         bcx,
         block_map,
         local_map: IndexVec::with_capacity(mir.local_decls.len()),
+        local_layouts: IndexVec::new(), // set by `codegen_fn_prelude`
         skipped_stmts: Default::default(), // set by `codegen_fn_prelude`
         caller_location: None,             // set by `codegen_fn_prelude`
         exception_slot: None,

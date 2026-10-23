@@ -109,11 +109,10 @@ pub(crate) fn analyze<'tcx>(
         if !has_storage_live[local] || forwarding.alias_of[local].is_some() {
             continue;
         }
-        let ty = fx.monomorphize(mir.local_decls[local].ty);
-        if ssa[local].is_ssa(fx, ty) {
+        let layout = fx.local_layouts[local];
+        if ssa[local].is_ssa_layout(fx, layout) {
             continue;
         }
-        let layout = fx.layout_of(ty);
         if layout.is_unsized() || layout.size.bytes() == 0 {
             continue;
         }

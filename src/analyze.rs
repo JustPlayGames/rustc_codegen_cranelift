@@ -16,6 +16,15 @@ impl SsaKind {
     pub(crate) fn is_ssa<'tcx>(self, fx: &FunctionCx<'_, '_, 'tcx>, ty: Ty<'tcx>) -> bool {
         self == SsaKind::MaybeSsa && ssa_shape(fx, fx.layout_of(ty)).is_some()
     }
+
+    /// `is_ssa` for a type whose layout is at hand.
+    pub(crate) fn is_ssa_layout<'tcx>(
+        self,
+        fx: &FunctionCx<'_, '_, 'tcx>,
+        layout: TyAndLayout<'tcx>,
+    ) -> bool {
+        self == SsaKind::MaybeSsa && ssa_shape(fx, layout).is_some()
+    }
 }
 
 /// How the value of a local kept in Cranelift variables is split: any sized type whose layout is
@@ -180,7 +189,7 @@ fn keep_projected_locals_in_memory(
                 return;
             }
             let fx = self.fx;
-            let layout = fx.layout_of(fx.monomorphize(fx.mir.local_decls[place.local].ty));
+            let layout = fx.local_layouts[place.local];
             let Some(shape) = ssa_shape(fx, layout) else { return };
             if !projection_in_vars(fx, shape, layout, place.projection) {
                 self.flag_map[place.local] = SsaKind::NotSsa;

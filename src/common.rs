@@ -287,6 +287,9 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     pub(crate) bcx: FunctionBuilder<'clif>,
     pub(crate) block_map: IndexVec<BasicBlock, Block>,
     pub(crate) local_map: IndexVec<Local, CPlace<'tcx>>,
+    /// The monomorphized type and layout of every local, computed once by
+    /// `codegen_fn_prelude` before the analyses that look at locals' layouts.
+    pub(crate) local_layouts: IndexVec<Local, TyAndLayout<'tcx>>,
     /// Statements not to emit: moves into temporaries that alias their source (`move_forwarding`).
     pub(crate) skipped_stmts: rustc_data_structures::fx::FxHashSet<rustc_middle::mir::Location>,
 

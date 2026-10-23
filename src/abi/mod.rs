@@ -286,6 +286,13 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     fx.bcx.switch_to_block(start_block);
     fx.bcx.ins().nop();
 
+    fx.local_layouts = fx
+        .mir
+        .local_decls
+        .iter()
+        .map(|decl| fx.layout_of(fx.monomorphize(decl.ty)))
+        .collect();
+
     let ssa_analyzed = crate::analyze::analyze(fx);
 
     self::comments::add_args_header_comment(fx);
@@ -425,8 +432,7 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
     let sharing = crate::stack_slot_sharing::analyze(fx, &ssa_analyzed, &forwarding);
     let mut shared_slots = vec![None; sharing.groups.len()];
     for local in fx.mir.vars_and_temps_iter() {
-        let ty = fx.monomorphize(fx.mir.local_decls[local].ty);
-        let layout = fx.layout_of(ty);
+        let layout = fx.local_layouts[local];
 
         let place = if forwarding.alias_of[local].is_some() {
             // Replaced by its source's place below, once every local has one.
@@ -440,7 +446,7 @@ pub(crate) fn codegen_fn_prelude<'tcx>(fx: &mut FunctionCx<'_, '_, 'tcx>, start_
             self::comments::add_local_place_comments(fx, place, local);
             place
         } else {
-            let is_ssa = ssa_analyzed[local].is_ssa(fx, ty);
+            let is_ssa = ssa_analyzed[local].is_ssa_layout(fx, layout);
             make_local_place(fx, local, layout, is_ssa)
         };
         assert_eq!(fx.local_map.push(place), local);
