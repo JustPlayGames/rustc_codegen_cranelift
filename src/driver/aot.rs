@@ -165,6 +165,7 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
     let mut module = make_module(tcx, cgu_name.as_str());
     let mut type_dbg = TypeDebugContext::default();
     let mut constants_cx = crate::constant::ConstantCx::new();
+    let mut func_ctx = cranelift_frontend::FunctionBuilderContext::new();
     super::predefine_mono_items(tcx, &mut module.module, &mono_items);
     for (mono_item, item_data) in mono_items {
         match mono_item {
@@ -192,6 +193,7 @@ fn codegen_cgu(tcx: TyCtxt<'_>, cgu_name: Symbol) -> AotModule {
                     module.debug_context.as_mut(),
                     &mut type_dbg,
                     Function::new(),
+                    &mut func_ctx,
                     &mut module.module,
                     &mut constants_cx,
                     instance,

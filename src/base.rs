@@ -42,6 +42,7 @@ pub(crate) fn codegen_fn<'tcx>(
     mut debug_context: Option<&mut DebugContext>,
     type_dbg: &mut TypeDebugContext<'tcx>,
     cached_func: Function,
+    func_ctx: &mut FunctionBuilderContext,
     module: &mut dyn Module,
     constants_cx: &mut ConstantCx<'tcx>,
     instance: Instance<'tcx>,
@@ -65,8 +66,8 @@ pub(crate) fn codegen_fn<'tcx>(
     let sig = get_function_sig(tcx, module.target_config().default_call_conv, instance);
     let func_id = module.declare_function(&symbol_name, Linkage::Local, &sig).unwrap();
 
-    // Make the FunctionBuilder
-    let mut func_ctx = FunctionBuilderContext::new();
+    // Make the FunctionBuilder. Its context comes cleared from the previous function (`finalize`
+    // clears it), with the capacity it grew to.
     let mut func = cached_func;
     func.clear();
     func.name = UserFuncName::user(0, func_id.as_u32());
@@ -75,7 +76,7 @@ pub(crate) fn codegen_fn<'tcx>(
         func.collect_debug_info();
     }
 
-    let mut bcx = FunctionBuilder::new(&mut func, &mut func_ctx);
+    let mut bcx = FunctionBuilder::new(&mut func, func_ctx);
 
     // Predefine blocks
     let start_block = bcx.create_block();

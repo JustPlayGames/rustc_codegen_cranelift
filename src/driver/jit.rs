@@ -160,6 +160,7 @@ fn codegen_and_compile_fn<'tcx>(
             debug_context.as_deref_mut(),
             &mut TypeDebugContext::default(),
             cached_func,
+            &mut cranelift_frontend::FunctionBuilderContext::new(),
             module,
             &mut crate::constant::ConstantCx::new(),
             instance,
