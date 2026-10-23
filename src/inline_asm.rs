@@ -479,6 +479,18 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
                 }
             }
 
+            // On Windows x64 the wrapper is called as fastcall (`call_inline_asm`), so its caller
+            // keeps values in XMM6-15 across the call. rustc lists them as clobbered by the C ABI
+            // there anyway (the upper halves of their YMM/ZMM registers are volatile), so save
+            // them here.
+            if !need_save && self.win64_wrapper() {
+                if let InlineAsmReg::X86(r) = reg {
+                    let name = r.name();
+                    need_save = matches!(&name[..name.len().min(3)], "xmm" | "ymm" | "zmm")
+                        && matches!(name[3..].parse::<u8>(), Ok(6..=15));
+                }
+            }
+
             if need_save {
                 slots_clobber[i] = Some(new_slot(reg.reg_class()));
             }
@@ -528,6 +540,12 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
         self.stack_slot_size = slot_size;
     }
 
+    /// Whether the wrapper is called with the Windows x64 convention (see `call_inline_asm`).
+    fn win64_wrapper(&self) -> bool {
+        self.arch == InlineAsmArch::X86_64
+            && crate::target_tuple(self.tcx.sess).binary_format == BinaryFormat::Coff
+    }
+
     fn generate_asm_wrapper(&self, asm_name: &str) -> String {
         let binary_format = crate::target_tuple(self.tcx.sess).binary_format;
 
@@ -559,7 +577,7 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
             generated_asm.push_str(".intel_syntax noprefix\n");
         }
 
-        Self::prologue(&mut generated_asm, self.arch);
+        Self::prologue(&mut generated_asm, self.arch, self.win64_wrapper());
 
         // Save clobbered registers
         if !self.options.contains(InlineAsmOptions::NORETURN) {
@@ -714,14 +732,16 @@ impl<'tcx> InlineAssemblyGenerator<'_, 'tcx> {
         generated_asm
     }
 
-    fn prologue(generated_asm: &mut String, arch: InlineAsmArch) {
+    /// `coff`: the wrapper is called with the Windows x64 convention (see `call_inline_asm`), so
+    /// its argument arrives in rcx.
+    fn prologue(generated_asm: &mut String, arch: InlineAsmArch, coff: bool) {
         match arch {
             InlineAsmArch::X86_64 => {
                 generated_asm.push_str("    push rbp\n");
                 generated_asm.push_str("    mov rbp,rsp\n");
                 generated_asm.push_str("    push rbx\n"); // rbx is callee saved
                 // rbx is reserved by LLVM for the "base pointer", so rustc doesn't allow using it
-                generated_asm.push_str("    mov rbx,rdi\n");
+                generated_asm.push_str(if coff { "    mov rbx,rcx\n" } else { "    mov rbx,rdi\n" });
             }
             InlineAsmArch::AArch64 => {
                 generated_asm.push_str("    stp fp, lr, [sp, #-32]!\n");
@@ -888,13 +908,24 @@ fn call_inline_asm<'tcx>(
     let stack_slot =
         fx.create_stack_slot(u32::try_from(slot_size.bytes().next_multiple_of(16)).unwrap(), 16);
 
+    // The wrapper saves and restores the registers its template clobbers that its convention
+    // preserves (`allocate_stack_slots`). On Windows x64 it is called as fastcall: as SystemV,
+    // every caller saved and restored RSI, RDI and XMM6-15 around the call, twelve registers the
+    // template rarely touches.
+    let call_conv = if fx.tcx.sess.target.arch == Arch::X86_64
+        && crate::target_tuple(fx.tcx.sess).binary_format == BinaryFormat::Coff
+    {
+        CallConv::WindowsFastcall
+    } else {
+        CallConv::SystemV
+    };
     let inline_asm_func = fx
         .module
         .declare_function(
             asm_name,
             Linkage::Import,
             &Signature {
-                call_conv: CallConv::SystemV,
+                call_conv,
                 params: vec![AbiParam::new(fx.pointer_type)],
                 returns: vec![],
             },
