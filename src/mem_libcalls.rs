@@ -16,9 +16,10 @@
 
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::ir::{
-    self, ConstantData, ExternalName, InstBuilder, InstructionData, LibCall, MemFlagsData, Opcode,
-    Value, types,
+    self, BlockArg, ConstantData, ExternalName, InstBuilder, InstructionData, LibCall,
+    MemFlagsData, Opcode, Value, ValueDef, types,
 };
+use rustc_data_structures::fx::FxHashMap;
 use target_lexicon::Architecture;
 
 /// The largest copy or fill written out inline, in bytes.
@@ -28,6 +29,30 @@ pub(crate) const MAX_INLINE_BYTES: u64 = 128;
 pub(crate) fn enabled(isa: &dyn cranelift_codegen::isa::TargetIsa) -> bool {
     matches!(isa.triple().architecture, Architecture::X86_64 | Architecture::Aarch64(_))
         && std::env::var_os("CG_CLIF_NO_INLINE_MEMCPY").is_none()
+}
+
+/// Copies a value of `size` bytes (16 up to [`MAX_INLINE_BYTES`]) with 16-byte vector loads and
+/// stores (and scalar ones for the tail) where the pass is enabled, instead of
+/// `emit_small_memory_copy`'s 8-byte ones or a `memcpy` call above 32 bytes. Returns whether it
+/// did.
+pub(crate) fn emit_vector_copy(
+    fx: &mut crate::FunctionCx<'_, '_, '_>,
+    dest: Value,
+    src: Value,
+    size: u64,
+    flags: MemFlagsData,
+) -> bool {
+    if !(16..=MAX_INLINE_BYTES).contains(&size) || !enabled(fx.module.isa()) {
+        return false;
+    }
+    debug_assert!(!flags.aligned(), "the alignment of 16-byte accesses is not known");
+    let loads: Vec<_> = chunks(size)
+        .map(|(offset, ty)| (fx.bcx.ins().load(ty, flags, src, offset), offset))
+        .collect();
+    for (value, offset) in loads {
+        fx.bcx.ins().store(flags, value, dest, offset);
+    }
+    true
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -49,6 +74,27 @@ pub(crate) fn inline_small_mem_libcalls(func: &mut ir::Function) {
         return;
     }
 
+    // The values each block parameter receives: an inlined callee's parameters are block
+    // parameters fed by the jump into its body.
+    let mut incoming: FxHashMap<(ir::Block, usize), Vec<Option<Value>>> = FxHashMap::default();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let dfg = &func.dfg;
+            for dest in dfg.insts[inst].branch_destination(&dfg.jump_tables, &dfg.exception_tables)
+            {
+                let target = dest.block(&dfg.value_lists);
+                for (i, arg) in dest.args(&dfg.value_lists).enumerate() {
+                    let value = match arg {
+                        BlockArg::Value(v) => Some(v),
+                        _ => None,
+                    };
+                    incoming.entry((target, i)).or_default().push(value);
+                }
+            }
+        }
+    }
+    let consts = Consts { dfg: &func.dfg, incoming: &incoming };
+
     let mut todo = Vec::new();
     for block in func.layout.blocks() {
         for inst in func.layout.block_insts(block) {
@@ -65,12 +111,12 @@ pub(crate) fn inline_small_mem_libcalls(func: &mut ir::Function) {
             if args.len() != 3 {
                 continue;
             }
-            let Some(size) = const_value(&func.dfg, args[2], 0) else { continue };
+            let Some(size) = consts.value(args[2], 0) else { continue };
             if size > MAX_INLINE_BYTES {
                 continue;
             }
             let fill = if kind == Kind::Set {
-                match const_value(&func.dfg, args[1], 0) {
+                match consts.value(args[1], 0) {
                     Some(v) => Some(v as u8),
                     None => continue,
                 }
@@ -145,33 +191,60 @@ fn chunks(size: u64) -> impl Iterator<Item = (i32, ir::Type)> {
     })
 }
 
-/// The value of `v` when it folds to a constant through a few integer operations.
-fn const_value(dfg: &ir::DataFlowGraph, v: Value, depth: u32) -> Option<u64> {
-    if depth > 6 {
-        return None;
-    }
-    let v = dfg.resolve_aliases(v);
-    let inst = dfg.value_def(v).inst()?;
-    let mask = |x: u64| {
-        let bits = dfg.value_type(v).bits();
-        if bits >= 64 { x } else { x & ((1u64 << bits) - 1) }
-    };
-    match dfg.insts[inst] {
-        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(mask(imm.bits() as u64)),
-        InstructionData::Binary { opcode, args } => {
-            let a = const_value(dfg, args[0], depth + 1)?;
-            let b = const_value(dfg, args[1], depth + 1)?;
-            match opcode {
-                Opcode::Imul => Some(mask(a.checked_mul(b)?)),
-                Opcode::Iadd => Some(mask(a.checked_add(b)?)),
-                Opcode::Ishl if b < 64 => Some(mask(a.checked_shl(b as u32)?)),
-                _ => None,
+/// Folds values to constants.
+struct Consts<'a> {
+    dfg: &'a ir::DataFlowGraph,
+    incoming: &'a FxHashMap<(ir::Block, usize), Vec<Option<Value>>>,
+}
+
+impl Consts<'_> {
+    /// The value of `v` when it folds to a constant through a few integer operations and block
+    /// parameters that receive the same constant from every branch.
+    fn value(&self, v: Value, depth: u32) -> Option<u64> {
+        if depth > 8 {
+            return None;
+        }
+        let dfg = self.dfg;
+        let v = dfg.resolve_aliases(v);
+        let mask = |x: u64| {
+            let bits = dfg.value_type(v).bits();
+            if bits >= 64 { x } else { x & ((1u64 << bits) - 1) }
+        };
+        let inst = match dfg.value_def(v) {
+            ValueDef::Result(inst, _) => inst,
+            ValueDef::Param(block, i) => {
+                let values = self.incoming.get(&(block, i))?;
+                let mut folded = None;
+                for &value in values {
+                    let c = self.value(value?, depth + 1)?;
+                    if folded.is_some_and(|f| f != c) {
+                        return None;
+                    }
+                    folded = Some(c);
+                }
+                return folded;
             }
+            _ => return None,
+        };
+        match dfg.insts[inst] {
+            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => {
+                Some(mask(imm.bits() as u64))
+            }
+            InstructionData::Binary { opcode, args } => {
+                let a = self.value(args[0], depth + 1)?;
+                let b = self.value(args[1], depth + 1)?;
+                match opcode {
+                    Opcode::Imul => Some(mask(a.checked_mul(b)?)),
+                    Opcode::Iadd => Some(mask(a.checked_add(b)?)),
+                    Opcode::Ishl if b < 64 => Some(mask(a.checked_shl(b as u32)?)),
+                    _ => None,
+                }
+            }
+            InstructionData::Unary { opcode: Opcode::Uextend, arg } => self.value(arg, depth + 1),
+            InstructionData::Unary { opcode: Opcode::Ireduce, arg } => {
+                self.value(arg, depth + 1).map(mask)
+            }
+            _ => None,
         }
-        InstructionData::Unary { opcode: Opcode::Uextend, arg } => const_value(dfg, arg, depth + 1),
-        InstructionData::Unary { opcode: Opcode::Ireduce, arg } => {
-            const_value(dfg, arg, depth + 1).map(mask)
-        }
-        _ => None,
     }
 }

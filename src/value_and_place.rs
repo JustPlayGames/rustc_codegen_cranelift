@@ -701,6 +701,11 @@ impl<'tcx> CPlace<'tcx> {
                         // alignment that fits in a `u8` if the actual alignment is larger.
                         let src_align = src_layout.align.bytes().try_into().unwrap_or(128);
                         let dst_align = dst_layout.align.bytes().try_into().unwrap_or(128);
+                        if crate::mem_libcalls::emit_vector_copy(
+                            fx, to_addr, from_addr, size, flags,
+                        ) {
+                            return;
+                        }
                         fx.bcx.emit_small_memory_copy(
                             fx.target_config,
                             to_addr,
