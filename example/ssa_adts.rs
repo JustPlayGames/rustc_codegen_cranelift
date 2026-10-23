@@ -259,6 +259,23 @@ fn wide(a: u128, b: u128) -> (u128, u128) {
     p
 }
 
+#[inline(never)]
+fn arrays(x: u16, s: &[u32]) -> (u32, u32) {
+    let small = [x; 5];
+    let big = [x; 40];
+    let bytes = [x as u8; 16];
+    let listed = [x, x + 1, x + 2];
+    let [first, .., last] = listed;
+    let ends = match s {
+        [a, .., b] => a + b,
+        _ => 0,
+    };
+    let sum = small.iter().map(|&v| u32::from(v)).sum::<u32>()
+        + big.iter().map(|&v| u32::from(v)).sum::<u32>()
+        + bytes.iter().map(|&v| u32::from(v)).sum::<u32>();
+    (sum + u32::from(first) + u32::from(last), ends)
+}
+
 fn main() {
     let x = 42u32;
     assert_eq!(non_null(black_box(Some(NonNull::from(&x)))), 42);
@@ -317,5 +334,7 @@ fn main() {
     assert_eq!(slices(black_box(&[1, 2, 3])), 7);
     assert_eq!(slices(black_box(&[])), 0);
     assert_eq!(wide(black_box(5), black_box(1)), (5, 15));
+    assert_eq!(arrays(black_box(3), black_box(&[5, 6, 7])), (15 + 120 + 48 + 3 + 5, 12));
+    assert_eq!(arrays(black_box(1), black_box(&[5])), (5 + 40 + 16 + 1 + 3, 0));
     println!("ssa_adts ok");
 }

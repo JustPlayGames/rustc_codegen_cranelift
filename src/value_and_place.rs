@@ -890,6 +890,27 @@ impl<'tcx> CPlace<'tcx> {
         CPlace::for_ptr(ptr.offset_value(fx, offset), elem_layout)
     }
 
+    /// Like [`CPlace::place_index`] with an index known at compile time, so the element's offset
+    /// is folded into its address.
+    pub(crate) fn place_const_index(
+        self,
+        fx: &mut FunctionCx<'_, '_, 'tcx>,
+        index: u64,
+    ) -> CPlace<'tcx> {
+        let (elem_layout, ptr) = match self.layout().ty.kind() {
+            ty::Array(elem_ty, _) => match self.inner {
+                CPlaceInner::Addr(addr, None) => (fx.layout_of(*elem_ty), addr),
+                CPlaceInner::Var(..) | CPlaceInner::Addr(_, Some(_)) | CPlaceInner::VarPair(..) => {
+                    bug!("Can't index into {self:?}")
+                }
+            },
+            ty::Slice(elem_ty) => (fx.layout_of(*elem_ty), self.to_ptr_unsized().0),
+            _ => bug!("place_const_index({:?})", self.layout().ty),
+        };
+        let offset = i64::try_from(elem_layout.size.bytes() * index).unwrap();
+        CPlace::for_ptr(ptr.offset_i64(fx, offset), elem_layout)
+    }
+
     pub(crate) fn place_deref(self, fx: &mut FunctionCx<'_, '_, 'tcx>) -> CPlace<'tcx> {
         let inner_layout = fx.layout_of(self.layout().ty.builtin_deref(true).unwrap());
         if fx.tcx.type_has_metadata(inner_layout.ty, fx.typing_env()) {
