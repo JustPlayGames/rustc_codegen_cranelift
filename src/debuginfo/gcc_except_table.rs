@@ -92,6 +92,24 @@ impl GccExceptTable {
 pub(super) struct CallSiteTable(pub Vec<CallSite>);
 
 impl CallSiteTable {
+    /// Adds a call site, or extends the last entry over it when that entry has the same landing
+    /// pad and action, as LLVM does: one entry per call made the tables of a crate about twice the
+    /// size of LLVM's, and the linker keeps every table of the output. Call sites must come in
+    /// order of their address, and every call that can unwind must have one: a merged entry also
+    /// covers the instructions between its calls, but no other call.
+    pub(super) fn push(&mut self, call_site: CallSite) {
+        if let Some(last) = self.0.last_mut()
+            && last.landing_pad == call_site.landing_pad
+            && last.action_entry.map(|action| action.0)
+                == call_site.action_entry.map(|action| action.0)
+            && call_site.start >= last.start + last.length
+        {
+            last.length = call_site.start + call_site.length - last.start;
+            return;
+        }
+        self.0.push(call_site);
+    }
+
     fn encoded_size(&self) -> u64 {
         let mut len = LenWriter(0);
         self.write(&mut len).unwrap();

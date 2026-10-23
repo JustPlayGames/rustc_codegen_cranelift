@@ -230,7 +230,7 @@ impl UnwindContext {
 
                     for call_site in context.compiled_code().unwrap().buffer.call_sites() {
                         if call_site.exception_handlers.is_empty() {
-                            gcc_except_table_data.call_sites.0.push(CallSite {
+                            gcc_except_table_data.call_sites.push(CallSite {
                                 start: u64::from(call_site.ret_addr - 1),
                                 length: 1,
                                 landing_pad: 0,
@@ -248,7 +248,7 @@ impl UnwindContext {
                                         EXCEPTION_HANDLER_CATCH => Some(catch_action),
                                         _ => unreachable!(),
                                     };
-                                    gcc_except_table_data.call_sites.0.push(CallSite {
+                                    gcc_except_table_data.call_sites.push(CallSite {
                                         start: u64::from(call_site.ret_addr - 1),
                                         length: 1,
                                         landing_pad,
