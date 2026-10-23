@@ -22,8 +22,8 @@ use rustc_errors::{DiagCtxt, DiagCtxtHandle};
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mono::{MonoItem, MonoItemData, Visibility};
-use rustc_session::{BorrowedIncrCompSession, Session};
 use rustc_session::config::{OptLevel, OutputFilenames, OutputType};
+use rustc_session::{BorrowedIncrCompSession, Session};
 use rustc_span::Symbol;
 
 use crate::base::CodegenedFunction;
@@ -238,6 +238,12 @@ fn compile_cgu(
 
         prof.generic_activity_with_arg("inline functions", &*cgu_name).run(|| {
             crate::inline::inline_cgu(aot_module.inline_mode, &mut aot_module.codegened_functions)
+        });
+
+        prof.generic_activity_with_arg("rewrite popcount tests", &*cgu_name).run(|| {
+            for codegened_func in &mut aot_module.codegened_functions {
+                crate::optimize::pow2_test::rewrite_popcount_tests(&mut codegened_func.func);
+            }
         });
 
         if crate::mem_libcalls::enabled(aot_module.module.isa()) {
