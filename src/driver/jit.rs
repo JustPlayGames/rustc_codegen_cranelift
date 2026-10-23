@@ -29,6 +29,7 @@ fn create_jit_module(
         JITModule::new(jit_builder),
         &rustc_symbol_mangling::eh_personality_symbol(tcx),
         false,
+        crate::common::terminate_symbols(tcx),
     );
 
     let cx = DebugContext::new(tcx, jit_module.isa(), false, "dummy_cgu_name");
