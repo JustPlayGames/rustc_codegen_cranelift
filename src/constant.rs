@@ -14,6 +14,10 @@ use rustc_middle::ty::{ExistentialTraitRef, ScalarInt};
 
 use crate::prelude::*;
 
+/// The allocations of a codegen unit: one data object per allocation for all of its functions
+/// and statics, as LLVM has one global per allocation and codegen unit. (One per function made
+/// half of a crate's data objects duplicates.)
+#[derive(Default)]
 pub(crate) struct ConstantCx {
     todo: Vec<TodoItem>,
     anon_allocs: FxHashMap<AllocId, DataId>,
@@ -30,13 +34,18 @@ impl ConstantCx {
         ConstantCx { todo: vec![], anon_allocs: FxHashMap::default() }
     }
 
-    pub(crate) fn finalize(mut self, tcx: TyCtxt<'_>, module: &mut dyn Module) {
-        define_all_allocs(tcx, module, &mut self);
+    /// Defines the allocations used since the last call.
+    pub(crate) fn finalize(&mut self, tcx: TyCtxt<'_>, module: &mut dyn Module) {
+        define_all_allocs(tcx, module, self);
     }
 }
 
-pub(crate) fn codegen_static(tcx: TyCtxt<'_>, module: &mut dyn Module, def_id: DefId) -> DataId {
-    let mut constants_cx = ConstantCx::new();
+pub(crate) fn codegen_static(
+    tcx: TyCtxt<'_>,
+    module: &mut dyn Module,
+    constants_cx: &mut ConstantCx,
+    def_id: DefId,
+) -> DataId {
     constants_cx.todo.push(TodoItem::Static(def_id));
     constants_cx.finalize(tcx, module);
 
@@ -256,10 +265,11 @@ pub(crate) fn data_id_for_alloc_id(
     alloc_id: AllocId,
     mutability: rustc_hir::Mutability,
 ) -> DataId {
-    cx.todo.push(TodoItem::Alloc(alloc_id));
-    *cx.anon_allocs
-        .entry(alloc_id)
-        .or_insert_with(|| module.declare_anonymous_data(mutability.is_mut(), false).unwrap())
+    *cx.anon_allocs.entry(alloc_id).or_insert_with(|| {
+        // Defined by the next `finalize`, once for the codegen unit.
+        cx.todo.push(TodoItem::Alloc(alloc_id));
+        module.declare_anonymous_data(mutability.is_mut(), false).unwrap()
+    })
 }
 
 pub(crate) fn data_id_for_vtable<'tcx>(

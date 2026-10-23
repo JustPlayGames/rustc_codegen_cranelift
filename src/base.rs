@@ -42,6 +42,7 @@ pub(crate) fn codegen_fn<'tcx>(
     type_dbg: &mut TypeDebugContext<'tcx>,
     cached_func: Function,
     module: &mut dyn Module,
+    constants_cx: &mut ConstantCx,
     instance: Instance<'tcx>,
 ) -> CodegenedFunction {
     debug_assert!(!instance.args.has_infer());
@@ -102,7 +103,7 @@ pub(crate) fn codegen_fn<'tcx>(
         tcx,
         target_config,
         pointer_type,
-        constants_cx: ConstantCx::new(),
+        constants_cx: std::mem::take(constants_cx),
         func_debug_cx,
 
         cgu_name,
@@ -138,6 +139,7 @@ pub(crate) fn codegen_fn<'tcx>(
     let inline_asm = fx.inline_asm;
 
     fx.constants_cx.finalize(fx.tcx, &mut *fx.module);
+    *constants_cx = fx.constants_cx;
 
     if crate::pretty_clif::should_write_ir(tcx.sess) {
         crate::pretty_clif::write_clif_file(

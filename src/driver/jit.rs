@@ -76,7 +76,12 @@ pub(crate) fn run_jit(tcx: TyCtxt<'_>, target_cpu: String, jit_args: Vec<String>
                     );
                 }
                 MonoItem::Static(def_id) => {
-                    crate::constant::codegen_static(tcx, &mut jit_module, def_id);
+                    crate::constant::codegen_static(
+                        tcx,
+                        &mut jit_module,
+                        &mut crate::constant::ConstantCx::new(),
+                        def_id,
+                    );
                 }
                 MonoItem::GlobalAsm(item_id) => {
                     let item = tcx.hir_item(item_id);
@@ -155,6 +160,7 @@ fn codegen_and_compile_fn<'tcx>(
             &mut TypeDebugContext::default(),
             cached_func,
             module,
+            &mut crate::constant::ConstantCx::new(),
             instance,
         );
 
