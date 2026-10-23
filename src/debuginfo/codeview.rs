@@ -211,6 +211,11 @@ impl CodeViewUnit {
         for &MachSrcLoc { start, end: _, loc } in mcr.buffer.get_srclocs_sorted() {
             let loc = loc.as_abs();
             let (file_id, line, _col) = if loc.is_default() {
+                // Code without a location inside the body continues the previous line (see
+                // `create_debug_lines`); the prologue belongs to the function's line.
+                if body_start.is_some() {
+                    continue;
+                }
                 function_loc
             } else {
                 if body_start.is_none() {
