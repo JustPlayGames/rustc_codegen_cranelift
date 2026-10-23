@@ -245,10 +245,12 @@ impl Consts<'_> {
         }
         let dfg = self.dfg;
         let v = dfg.resolve_aliases(v);
-        let mask = |x: u64| {
-            let bits = dfg.value_type(v).bits();
-            if bits >= 64 { x } else { x & ((1u64 << bits) - 1) }
-        };
+        let ty = dfg.value_type(v);
+        if !ty.is_int() {
+            return None;
+        }
+        let bits = ty.bits();
+        let mask = |x: u64| if bits >= 64 { x } else { x & ((1u64 << bits) - 1) };
         let inst = match dfg.value_def(v) {
             ValueDef::Result(inst, _) => inst,
             ValueDef::Param(block, i) => {
@@ -275,7 +277,12 @@ impl Consts<'_> {
                 match opcode {
                     Opcode::Imul => Some(mask(a.checked_mul(b)?)),
                     Opcode::Iadd => Some(mask(a.checked_add(b)?)),
-                    Opcode::Ishl if b < 64 => Some(mask(a.checked_shl(b as u32)?)),
+                    // Cranelift takes the shift amount modulo the width (as Rust's `<<`
+                    // does without overflow checks). An i128 result must fit in 64 bits.
+                    Opcode::Ishl => {
+                        let shifted = u128::from(a) << (b % u64::from(bits));
+                        Some(mask(u64::try_from(shifted).ok()?))
+                    }
                     _ => None,
                 }
             }
