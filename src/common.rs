@@ -257,7 +257,7 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     pub(crate) tcx: TyCtxt<'tcx>,
     pub(crate) target_config: TargetFrontendConfig, // Cached from module
     pub(crate) pointer_type: Type,                  // Cached from module
-    pub(crate) constants_cx: ConstantCx,
+    pub(crate) constants_cx: ConstantCx<'tcx>,
     pub(crate) func_debug_cx: Option<FunctionDebugContext>,
 
     pub(crate) cgu_name: Symbol,
@@ -280,6 +280,8 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
     /// The blocks unwinding calls land in, one per cleanup block (storing the exception pointer
     /// and jumping to it) and one per reason to abort, shared by all calls that unwind there.
     pub(crate) landing_pads: rustc_data_structures::fx::FxHashMap<LandingPad, Block>,
+    /// The functions this function calls directly, see [`FunctionCx::get_function_ref`].
+    pub(crate) func_refs: rustc_data_structures::fx::FxHashMap<Instance<'tcx>, FuncRef>,
 
     pub(crate) clif_comments: crate::pretty_clif::CommentWriter,
 
