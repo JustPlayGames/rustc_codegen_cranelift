@@ -34,6 +34,7 @@ aot.backtrace_frames
 aot.probe_unwind
 aot.terminate_calls
 aot.shared_panics
+aot.unreferenced_inlined
 aot.powi_libcall_signature
 aot.codeview
 aot.issue-72793

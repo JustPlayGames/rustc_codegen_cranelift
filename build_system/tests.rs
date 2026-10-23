@@ -262,6 +262,21 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.unreferenced_inlined", &|runner| {
+        // Always-inline functions that inlining leaves unreferenced are left out; those still
+        // reached through pointers, vtables or recursion keep their code.
+        for (opt, debuginfo) in [("0", "0"), ("2", "0"), ("0", "2")] {
+            let name = format!("unreferenced_inlined{opt}{debuginfo}");
+            runner.run_rustc([
+                "example/unreferenced_inlined.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cdebuginfo={debuginfo}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
