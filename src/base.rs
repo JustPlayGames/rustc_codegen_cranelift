@@ -33,7 +33,7 @@ pub(crate) struct CodegenedFunction {
     func_debug_cx: Option<FunctionDebugContext>,
     inline_asm: String,
     pub(crate) inline_hints: crate::inline::InlineHints,
-    regalloc: crate::regalloc_choice::Hint,
+    pub(crate) regalloc: crate::regalloc_choice::Hint,
 }
 
 pub(crate) fn codegen_fn<'tcx>(

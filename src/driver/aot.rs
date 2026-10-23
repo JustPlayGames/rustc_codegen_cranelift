@@ -42,6 +42,8 @@ pub(crate) struct AotModule {
     inline_mode: crate::inline::InlineMode,
     /// The functions that data objects and the entry wrapper of this codegen unit refer to.
     outside_func_refs: rustc_data_structures::fx::FxHashSet<FuncId>,
+    /// Functions compiled as aliases of another one: (alias, canonical).
+    aliases: Vec<(FuncId, FuncId)>,
 }
 
 fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
@@ -93,6 +95,7 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
         global_asm,
         inline_mode,
         outside_func_refs: Default::default(),
+        aliases: vec![],
     }
 }
 
@@ -105,8 +108,20 @@ fn emit_module(
     name: String,
     global_asm_object: Option<PathBuf>,
     producer_str: &str,
+    aliases: &[(FuncId, FuncId)],
 ) -> Result<CompiledModule, String> {
     let mut product = module.finish();
+
+    // Functions folded into an identical one (`fold_identical`): their symbols name its code.
+    for &(alias, canonical) in aliases {
+        let canonical = product.object.symbol(product.function_symbol(canonical));
+        let (section, value, size) = (canonical.section, canonical.value, canonical.size);
+        let alias = product.function_symbol(alias);
+        let alias = product.object.symbol_mut(alias);
+        alias.section = section;
+        alias.value = value;
+        alias.size = size;
+    }
 
     if let Some(mut debug) = debug {
         debug.emit(&mut product);
@@ -291,6 +306,20 @@ fn compile_cgu(
             });
         }
 
+        // Functions with the same IR as an earlier one are compiled once (see `fold_identical`).
+        let folded = if aot_module.debug_context.is_some()
+            || aot_module.module.isa().triple().binary_format == target_lexicon::BinaryFormat::Macho
+        {
+            vec![]
+        } else {
+            prof.generic_activity_with_arg("fold identical functions", &*cgu_name).run(|| {
+                let declarations = aot_module.module.declarations();
+                crate::fold_identical::find(&aot_module.codegened_functions, &unreferenced, |id| {
+                    declarations.get_function_decl(id).linkage.is_definable()
+                })
+            })
+        };
+
         let mut cached_context = Context::new();
         for (i, codegened_func) in aot_module.codegened_functions.into_iter().enumerate() {
             if unreferenced.get(i).copied().unwrap_or(false) {
@@ -298,6 +327,16 @@ fn compile_cgu(
                     .module
                     .define_function_bytes(codegened_func.func_id, 1, trap, &[])
                     .unwrap();
+                continue;
+            }
+            if let Some(canonical) = folded.get(i).copied().flatten() {
+                // Defined empty, so the module counts it as defined; `emit_module` then points
+                // its symbol at the canonical function's code.
+                aot_module
+                    .module
+                    .define_function_bytes(codegened_func.func_id, 1, &[], &[])
+                    .unwrap();
+                aot_module.aliases.push((codegened_func.func_id, canonical));
                 continue;
             }
             crate::base::compile_fn(
@@ -340,6 +379,7 @@ fn compile_cgu(
             cgu_name.clone(),
             global_asm_object_file,
             &aot_module.producer,
+            &aot_module.aliases,
         )
     })
 }

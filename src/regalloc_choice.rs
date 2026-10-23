@@ -27,7 +27,7 @@ const LARGE: usize = 1024;
 const LARGE_WITHOUT_LOOPS: usize = 256;
 
 /// What `choose` needs to know about a function besides its body.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Hint {
     /// The ISA's allocator for every function.
     Isa,

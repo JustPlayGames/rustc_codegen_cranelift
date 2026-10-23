@@ -66,6 +66,7 @@ mod constant;
 mod debuginfo;
 mod discriminant;
 mod driver;
+mod fold_identical;
 mod global_asm;
 mod inline;
 mod inline_asm;
