@@ -229,6 +229,25 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.shared_panics", &|runner| {
+        // Sites that panic alike share one panic call without debuginfo: each still panics
+        // with its own message and location and runs its own cleanup.
+        if !runner.panic_unwind_support {
+            return;
+        }
+        for (opt, debuginfo) in [("0", "0"), ("2", "0"), ("0", "2")] {
+            let name = format!("shared_panics{opt}{debuginfo}");
+            runner.run_rustc([
+                "example/shared_panics.rs",
+                &format!("-Copt-level={opt}"),
+                &format!("-Cdebuginfo={debuginfo}"),
+                "-Coverflow-checks=on",
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.backtrace_frames", &|runner| {
         // Backtraces unwind through functions without a frame pointer.
         for (opt, debuginfo) in [("0", "0"), ("0", "1"), ("2", "1")] {
