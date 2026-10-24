@@ -545,48 +545,99 @@ fn emit_pdata_xdata(
     functions: &[WinFunction],
     seh_personality: Option<FuncId>,
 ) {
-    use object::write::Relocation;
-    use object::{RelocationEncoding, RelocationFlags, RelocationKind, SectionKind};
-
-    let image_offset = RelocationFlags::Generic {
-        kind: RelocationKind::ImageOffset,
-        encoding: RelocationEncoding::Generic,
-        size: 32,
-    };
-
-    let xdata_section =
-        product.object.add_section(vec![], b".xdata".to_vec(), SectionKind::ReadOnlyData);
-    let pdata_section =
-        product.object.add_section(vec![], b".pdata".to_vec(), SectionKind::ReadOnlyData);
-    let xdata_symbol = product.object.section_symbol(xdata_section);
     let personality_symbol = seh_personality.map(|id| product.function_symbol(id));
 
-    // COFF relocations have implicit addends, which `add_relocation` writes into the section
-    // data: set the data first.
-    let mut xdata = Vec::new();
-    let mut pdata = Vec::new();
-    let mut xdata_relocs = Vec::new();
-    let mut pdata_relocs = Vec::new();
+    // A function in a COMDAT (function sections on COFF) gets its .xdata and .pdata in sections
+    // of their own, associated with the function's, so the linker drops them with it. The others
+    // share one of each.
+    let mut shared = WinTables::default();
     for function in functions {
-        let xdata_offset = xdata.len();
+        let func_symbol = product.function_symbol(function.func_id);
+        let comdat = product
+            .object
+            .symbol(func_symbol)
+            .section
+            .id()
+            .and_then(|section| product.section_comdat(section));
+        match comdat {
+            Some(comdat) => {
+                let mut tables = WinTables::default();
+                tables.add(function, func_symbol, personality_symbol);
+                tables.emit(product, Some(comdat));
+            }
+            None => shared.add(function, func_symbol, personality_symbol),
+        }
+    }
+    if !shared.pdata.is_empty() {
+        shared.emit(product, None);
+    }
+}
+
+/// .xdata and .pdata of one or more functions.
+#[derive(Default)]
+struct WinTables {
+    xdata: Vec<u8>,
+    pdata: Vec<u8>,
+    /// Offset in .xdata, symbol.
+    xdata_relocs: Vec<(usize, object::write::SymbolId)>,
+    /// Offset in .pdata, symbol (`None`: the .xdata section), addend.
+    pdata_relocs: Vec<(usize, Option<object::write::SymbolId>, i64)>,
+}
+
+impl WinTables {
+    fn add(
+        &mut self,
+        function: &WinFunction,
+        func_symbol: object::write::SymbolId,
+        personality_symbol: Option<object::write::SymbolId>,
+    ) {
+        let xdata_offset = self.xdata.len();
         assert_eq!(xdata_offset % 4, 0);
-        xdata.extend_from_slice(&function.xdata);
+        self.xdata.extend_from_slice(&function.xdata);
         if let Some(handler_reloc) = function.handler_reloc {
-            xdata_relocs.push((xdata_offset + handler_reloc, personality_symbol.unwrap(), 0));
+            self.xdata_relocs.push((xdata_offset + handler_reloc, personality_symbol.unwrap()));
         }
 
-        let func_symbol = product.function_symbol(function.func_id);
-        let pdata_offset = pdata.len();
-        pdata.extend([0; 12]);
-        pdata_relocs.push((pdata_offset, func_symbol, 0));
-        pdata_relocs.push((pdata_offset + 4, func_symbol, i64::from(function.code_len)));
-        pdata_relocs.push((pdata_offset + 8, xdata_symbol, i64::try_from(xdata_offset).unwrap()));
+        let pdata_offset = self.pdata.len();
+        self.pdata.extend([0; 12]);
+        self.pdata_relocs.push((pdata_offset, Some(func_symbol), 0));
+        self.pdata_relocs.push((pdata_offset + 4, Some(func_symbol), i64::from(function.code_len)));
+        self.pdata_relocs.push((pdata_offset + 8, None, i64::try_from(xdata_offset).unwrap()));
     }
 
-    product.object.section_mut(xdata_section).set_data(xdata, 4);
-    product.object.section_mut(pdata_section).set_data(pdata, 4);
-    for (section, relocs) in [(xdata_section, xdata_relocs), (pdata_section, pdata_relocs)] {
-        for (offset, symbol, addend) in relocs {
+    fn emit(self, product: &mut ObjectProduct, comdat: Option<object::write::ComdatId>) {
+        use object::write::Relocation;
+        use object::{RelocationEncoding, RelocationFlags, RelocationKind, SectionKind};
+
+        let image_offset = RelocationFlags::Generic {
+            kind: RelocationKind::ImageOffset,
+            encoding: RelocationEncoding::Generic,
+            size: 32,
+        };
+
+        let xdata_section =
+            product.object.add_section(vec![], b".xdata".to_vec(), SectionKind::ReadOnlyData);
+        let pdata_section =
+            product.object.add_section(vec![], b".pdata".to_vec(), SectionKind::ReadOnlyData);
+        let xdata_symbol = product.object.section_symbol(xdata_section);
+        if let Some(comdat) = comdat {
+            // COMDAT sections need their section symbol.
+            product.object.section_symbol(pdata_section);
+            product.object.comdat_mut(comdat).sections.extend([xdata_section, pdata_section]);
+        }
+
+        // COFF relocations have implicit addends, which `add_relocation` writes into the section
+        // data: set the data first.
+        product.object.section_mut(xdata_section).set_data(self.xdata, 4);
+        product.object.section_mut(pdata_section).set_data(self.pdata, 4);
+        let relocs = self
+            .xdata_relocs
+            .into_iter()
+            .map(|(offset, symbol)| (xdata_section, offset, symbol, 0))
+            .chain(self.pdata_relocs.into_iter().map(|(offset, symbol, addend)| {
+                (pdata_section, offset, symbol.unwrap_or(xdata_symbol), addend)
+            }));
+        for (section, offset, symbol, addend) in relocs {
             product
                 .object
                 .add_relocation(

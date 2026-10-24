@@ -31,15 +31,16 @@ object = { path = "vendor/object" }
 # tree only for SSA validation, register trees and spill slot lists cleared in place, operands
 # read once); the allocations it makes are unchanged.
 regalloc2 = { git = "https://github.com/JustPlayGames/regalloc2.git", rev = "34813c2bfd8a886c77c9e719081d69eefb02562a" }
-# The fork's branch cranelift-trunk-40 (Windows x64 unwinding and stack probes, relaxable GOT
-# loads on x86-64 ELF, frames without a frame pointer, anonymous data via section symbols, volatile
-# accesses kept as written, Windows x64 register preferences, a register allocator per function)
-cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
-cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
-cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
-cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
-cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
-cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "260a6af67716075a701b3d911d61219191cfe919" }
+# The fork's branch cranelift-trunk-44-comdat (Windows x64 unwinding and stack probes, relaxable
+# GOT loads on x86-64 ELF, frames without a frame pointer, anonymous data via section symbols,
+# volatile accesses kept as written, Windows x64 register preferences, a register allocator per
+# function, COMDAT function and data sections on COFF)
+cranelift-codegen = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
+cranelift-frontend = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
+cranelift-module = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
+cranelift-native = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
+cranelift-jit = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
+cranelift-object = { git = "https://github.com/JustPlayGames/wasmtime.git", rev = "7951894340f3edb1c1bc75c25c934cf8776dffc6" }
 #cranelift-codegen = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
 #cranelift-module = { git = "https://github.com/bytecodealliance/wasmtime.git", branch = "release-50.0.0" }
