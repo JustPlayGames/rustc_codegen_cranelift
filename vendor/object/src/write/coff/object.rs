@@ -500,6 +500,14 @@ impl<'a> Object<'a> {
 
             let mut weak_default_unique_name = Default::default();
 
+            // The sections in a COMDAT, looked up once each instead of searching every COMDAT
+            // for every symbol (quadratic with function sections, where every function's
+            // section is a COMDAT).
+            let mut in_comdat = vec![false; self.sections.len()];
+            for comdat_section in self.comdats.iter().flat_map(|comdat| comdat.sections.iter()) {
+                in_comdat[comdat_section.0] = true;
+            }
+
             // search for an external symbol defined in a non-COMDAT section to
             // use for the weak default names
             for symbol in self.symbols.iter().filter(defined_external_symbol) {
@@ -508,12 +516,7 @@ impl<'a> Object<'a> {
                     break;
                 };
 
-                if !self
-                    .comdats
-                    .iter()
-                    .flat_map(|comdat| comdat.sections.iter())
-                    .any(|comdat_section| *comdat_section == section_id)
-                {
+                if !in_comdat[section_id.0] {
                     weak_default_unique_name = &*symbol.name;
                     break;
                 }

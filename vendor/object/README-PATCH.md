@@ -1,6 +1,6 @@
 # object 0.40.0, patched
 
-The crates.io release of `object` 0.40.0 with two changes.
+The crates.io release of `object` 0.40.0 with three changes.
 
 1. `write::Object`'s symbol map and `write::StringTable` use hashbrown's default hasher
    (foldhash) in every build. Upstream picks std's `HashMap` (SipHash) whenever the `std` or
@@ -17,5 +17,10 @@ The crates.io release of `object` 0.40.0 with two changes.
    `reserve_section_headers_u32` are the low-level API for it. Test: `tests/coff_bigobj.rs`
    (`cargo test --manifest-path vendor/object/Cargo.toml --features read,write,std --release
    --test coff_bigobj`).
+
+3. The COFF writer's search for a defined external outside every COMDAT (to name weak
+   symbols' defaults) looked through every COMDAT's sections for each symbol: quadratic once
+   every function has a COMDAT of its own (1.7 s of a 1.9 s write for 32,639 functions). It
+   marks the COMDATs' sections once now; the output is unchanged.
 
 Drop this directory and the `[patch.crates-io]` entry once an `object` release does the same.
