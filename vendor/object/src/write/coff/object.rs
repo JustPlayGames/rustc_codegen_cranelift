@@ -428,6 +428,9 @@ impl<'a> Object<'a> {
 
     pub(crate) fn coff_write(&self, buffer: &mut dyn WritableBuffer) -> Result<()> {
         let mut writer = writer::Writer::new(buffer);
+        // More sections than 16-bit section numbers can name (0xff00 and up are reserved), as
+        // function sections give large units: the big object format, as LLVM writes it then.
+        writer.set_bigobj(self.sections.len() > 0xfeff);
 
         // Add section strings to strtab.
         let mut section_offsets = vec![SectionOffsets::default(); self.sections.len()];
@@ -583,7 +586,7 @@ impl<'a> Object<'a> {
 
         // Reserve file ranges.
         writer.reserve_file_header();
-        writer.reserve_section_headers(self.sections.len() as u16);
+        writer.reserve_section_headers_u32(self.sections.len() as u32);
         for (index, section) in self.sections.iter().enumerate() {
             section_offsets[index].offset = writer.reserve_section(section.data.len());
             section_offsets[index].reloc_offset =

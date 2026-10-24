@@ -29,7 +29,9 @@ pub struct Writer<'a> {
     buffer: CountingBuffer<&'a mut dyn WritableBuffer>,
     len: u64,
 
-    section_num: u16,
+    /// The big object format (`/bigobj`): 32-bit section numbers, 20-byte symbols.
+    bigobj: bool,
+    section_num: u32,
 
     symtab_offset: u32,
     symtab_num: u32,
@@ -50,6 +52,7 @@ impl<'a> Writer<'a> {
             buffer: CountingBuffer::new(buffer),
             len: 0,
 
+            bigobj: false,
             section_num: 0,
 
             symtab_offset: 0,
@@ -111,12 +114,37 @@ impl<'a> Writer<'a> {
         self.buffer.resize(offset);
     }
 
+    /// Write the big object format (`ANON_OBJECT_HEADER_BIGOBJ`, as `cl /bigobj` and LLVM
+    /// write it when an object has more sections than a 16-bit section number can name): a
+    /// 32-bit section count and section numbers, and 20-byte symbol table entries.
+    ///
+    /// This must be called before anything is reserved.
+    pub fn set_bigobj(&mut self, bigobj: bool) {
+        debug_assert_eq!(self.len, 0);
+        debug_assert_eq!(self.symtab_num, 0);
+        self.bigobj = bigobj;
+    }
+
+    /// The size of a symbol table entry, auxiliary entries included.
+    fn symbol_size(&self) -> usize {
+        if self.bigobj {
+            pe::IMAGE_SIZEOF_SYMBOL_EX
+        } else {
+            pe::IMAGE_SIZEOF_SYMBOL
+        }
+    }
+
     /// Reserve the range for the file header.
     ///
     /// This must be at the start of the file.
     pub fn reserve_file_header(&mut self) {
         debug_assert_eq!(self.len, 0);
-        self.reserve(mem::size_of::<pe::ImageFileHeader>() as u64, 1);
+        let size = if self.bigobj {
+            mem::size_of::<pe::AnonObjectHeaderBigobj>()
+        } else {
+            mem::size_of::<pe::ImageFileHeader>()
+        };
+        self.reserve(size as u64, 1);
     }
 
     /// Write the file header.
@@ -134,10 +162,30 @@ impl<'a> Writer<'a> {
             .reserve(self.len)
             .map_err(|_| Error(String::from("Cannot allocate buffer")))?;
 
+        if self.bigobj {
+            let header = pe::AnonObjectHeaderBigobj {
+                sig1: pe::IMAGE_FILE_MACHINE_UNKNOWN.into(),
+                sig2: 0xffff.into(),
+                version: 2.into(),
+                machine: header.machine.into(),
+                time_date_stamp: header.time_date_stamp.into(),
+                class_id: pe::ANON_OBJECT_HEADER_BIGOBJ_CLASS_ID,
+                size_of_data: 0.into(),
+                flags: 0.into(),
+                meta_data_size: 0.into(),
+                meta_data_offset: 0.into(),
+                number_of_sections: self.section_num.into(),
+                pointer_to_symbol_table: self.symtab_offset.into(),
+                number_of_symbols: self.symtab_num.into(),
+            };
+            self.buffer.write_pod(&header);
+            return Ok(());
+        }
+
         // Write file header.
         let header = pe::ImageFileHeader {
             machine: header.machine.into(),
-            number_of_sections: self.section_num.into(),
+            number_of_sections: (self.section_num as u16).into(),
             time_date_stamp: header.time_date_stamp.into(),
             pointer_to_symbol_table: self.symtab_offset.into(),
             number_of_symbols: self.symtab_num.into(),
@@ -151,7 +199,14 @@ impl<'a> Writer<'a> {
 
     /// Reserve the range for the section headers.
     pub fn reserve_section_headers(&mut self, section_num: u16) {
+        self.reserve_section_headers_u32(section_num.into());
+    }
+
+    /// Reserve the range for the section headers, more than 65,279 of them in the big object
+    /// format (see [`Self::set_bigobj`]).
+    pub fn reserve_section_headers_u32(&mut self, section_num: u32) {
         debug_assert_eq!(self.section_num, 0);
+        debug_assert!(self.bigobj || section_num <= 0xfeff);
         self.section_num = section_num;
         self.reserve(
             section_num as u64 * mem::size_of::<pe::ImageSectionHeader>() as u64,
@@ -325,21 +380,34 @@ impl<'a> Writer<'a> {
 
     /// Write a symbol table entry.
     pub fn write_symbol(&mut self, symbol: Symbol) {
-        let mut coff_symbol = pe::ImageSymbol {
-            name: [0; 8],
+        let mut name = [0; 8];
+        match symbol.name {
+            Name::Short(short) => name = short,
+            Name::Long(str_id) => {
+                let str_offset = self.strtab.get_offset(str_id);
+                name[4..8].copy_from_slice(&u32::to_le_bytes(str_offset));
+            }
+        }
+        if self.bigobj {
+            let coff_symbol = pe::ImageSymbolEx {
+                name,
+                value: symbol.value.into(),
+                section_number: symbol.section_number.into(),
+                typ: symbol.typ.into(),
+                storage_class: symbol.storage_class,
+                number_of_aux_symbols: symbol.number_of_aux_symbols,
+            };
+            self.buffer.write_pod(&coff_symbol);
+            return;
+        }
+        let coff_symbol = pe::ImageSymbol {
+            name,
             value: symbol.value.into(),
             section_number: (symbol.section_number.0 as u16).into(),
             typ: symbol.typ.into(),
             storage_class: symbol.storage_class,
             number_of_aux_symbols: symbol.number_of_aux_symbols,
         };
-        match symbol.name {
-            Name::Short(name) => coff_symbol.name = name,
-            Name::Long(str_id) => {
-                let str_offset = self.strtab.get_offset(str_id);
-                coff_symbol.name[4..8].copy_from_slice(&u32::to_le_bytes(str_offset));
-            }
-        }
         self.buffer.write_pod(&coff_symbol);
     }
 
@@ -350,14 +418,14 @@ impl<'a> Writer<'a> {
     /// This must be called before [`Self::reserve_symtab_strtab`].
     pub fn reserve_aux_file_name(&mut self, name: &[u8]) -> u8 {
         debug_assert_eq!(self.symtab_offset, 0);
-        let aux_count = name.len().div_ceil(pe::IMAGE_SIZEOF_SYMBOL);
+        let aux_count = name.len().div_ceil(self.symbol_size());
         self.symtab_num += aux_count as u32;
         aux_count as u8
     }
 
     /// Write auxiliary symbols for a file name.
     pub fn write_aux_file_name(&mut self, name: &[u8], aux_count: u8) {
-        let aux_len = aux_count as usize * pe::IMAGE_SIZEOF_SYMBOL;
+        let aux_len = aux_count as usize * self.symbol_size();
         debug_assert!(aux_len >= name.len());
         let old_len = self.buffer.count();
         self.buffer.write_bytes(name);
@@ -392,6 +460,11 @@ impl<'a> Writer<'a> {
             high_number: ((section.number >> 16) as u16).into(),
         };
         self.buffer.write_pod(&aux);
+        // In the big object format, auxiliary records are as long as a symbol.
+        if self.bigobj {
+            const PAD_LEN: usize = pe::IMAGE_SIZEOF_SYMBOL_EX - pe::IMAGE_SIZEOF_SYMBOL;
+            self.buffer.write_bytes(&[0u8; PAD_LEN]);
+        }
     }
 
     /// Reserve an auxiliary symbol for a weak external.
@@ -413,8 +486,8 @@ impl<'a> Writer<'a> {
         };
         self.buffer.write_pod(&aux);
         // write padding for the unused field
-        const PAD_LEN: usize = pe::IMAGE_SIZEOF_SYMBOL - mem::size_of::<pe::ImageAuxSymbolWeak>();
-        self.buffer.write_bytes(&[0u8; PAD_LEN]);
+        let pad_len = self.symbol_size() - mem::size_of::<pe::ImageAuxSymbolWeak>();
+        self.buffer.write_bytes(&[0u8; pe::IMAGE_SIZEOF_SYMBOL_EX][..pad_len]);
     }
 
     /// Return the number of reserved symbol table entries.
@@ -452,7 +525,7 @@ impl<'a> Writer<'a> {
     pub fn reserve_symtab_strtab(&mut self) -> Result<()> {
         debug_assert_eq!(self.symtab_offset, 0);
         self.symtab_offset =
-            self.reserve(self.symtab_num as u64 * pe::IMAGE_SIZEOF_SYMBOL as u64, 1);
+            self.reserve(self.symtab_num as u64 * self.symbol_size() as u64, 1);
 
         debug_assert_eq!(self.strtab_offset, 0);
         // First 4 bytes of strtab are the length.

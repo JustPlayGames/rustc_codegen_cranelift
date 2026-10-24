@@ -196,3 +196,8 @@ should_implement_trait = "allow"
 single_match = "allow"
 type_complexity = "allow"
 uninlined_format_args = "allow"
+
+[[test]]
+name = "coff_bigobj"
+path = "tests/coff_bigobj.rs"
+required-features = ["read", "write"]
