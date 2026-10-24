@@ -442,7 +442,25 @@ enum Unit {
     Queued,
     Translating,
     Ready(rustc_data_structures::sync::IntoDynSyncSend<(ModuleCodegen<AotModule>, u64)>),
+    /// Its job panicked (an internal compiler error, reported on that thread).
+    Failed,
     Taken,
+}
+
+/// Marks a unit failed when its job unwinds, so that the loop waiting for it stops waiting and
+/// the compiler exits with the job's error instead of hanging.
+struct FailUnit<'a> {
+    prefetch: &'a Prefetch,
+    cgu_name: Symbol,
+}
+
+impl Drop for FailUnit<'_> {
+    fn drop(&mut self) {
+        let mut state = self.prefetch.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.units.insert(self.cgu_name, Unit::Failed);
+        state.in_flight -= 1;
+        self.prefetch.changed.notify_all();
+    }
 }
 
 /// Marks the prefetch finished when rustc_codegen_ssa returns or unwinds, so the runner stops.
@@ -547,7 +565,14 @@ impl Prefetch {
                 _ => return,
             }
         }
+        let fail = FailUnit { prefetch: self, cgu_name };
+        // The build system's test of this path (example/prefetch_panic.rs).
+        static PANIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *PANIC.get_or_init(|| std::env::var_os("CG_CLIF_TEST_PANIC_IN_PREFETCH").is_some()) {
+            panic!("CG_CLIF_TEST_PANIC_IN_PREFETCH: codegen unit {cgu_name}");
+        }
         let unit = compile_codegen_unit(tcx, cgu_name);
+        std::mem::forget(fail);
         let mut state = self.state.lock().unwrap();
         state
             .units
@@ -585,6 +610,13 @@ impl Prefetch {
                     state.ready -= 1;
                     self.changed.notify_all();
                     return Some(unit.0);
+                }
+                Some(Unit::Failed) => {
+                    // The job's thread reported the error; rustc's join of the two sides
+                    // resumes that panic once this one is caught.
+                    state.units.insert(cgu_name, Unit::Taken);
+                    drop(state);
+                    rustc_errors::FatalError.raise()
                 }
                 Some(Unit::Taken) => unreachable!("codegen unit {cgu_name} asked for twice"),
             }

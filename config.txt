@@ -27,6 +27,7 @@ aot.volatile_unused
 aot.volatile_mmio
 aot.ssa_adts
 aot.uninhabited_variants
+aot.prefetch_panic
 aot.small_mem_copies
 aot.splat_repeat
 aot.small_switches

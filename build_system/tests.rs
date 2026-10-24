@@ -162,6 +162,51 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
             runner.run_out_command(&name, &[]);
         }
     }),
+    TestCase::custom("aot.prefetch_panic", &|runner| {
+        // A panic in a codegen unit translated ahead on another thread ends rustc with that
+        // error instead of hanging. Without the hook the same build succeeds.
+        let args = [
+            "example/prefetch_panic.rs",
+            "-Zthreads=8",
+            "-Ccodegen-units=32",
+            "--crate-name",
+            "prefetch_panic",
+        ];
+        runner.run_rustc(args);
+        runner.run_out_command("prefetch_panic", &[]);
+        let mut cmd = runner.rustc_command(args);
+        cmd.env("CG_CLIF_TEST_PANIC_IN_PREFETCH", "1");
+        cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("starting rustc");
+        let stderr = child.stderr.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut { stderr }, &mut text).unwrap();
+            text
+        });
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(120) {
+                let _ = child.kill();
+                panic!("rustc hung after a panic in a prefetched codegen unit");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let stderr = reader.join().unwrap();
+        // The main thread may have taken every unit back before a job started: then nothing
+        // panicked and the build succeeded.
+        if !status.success() {
+            assert!(
+                stderr.contains("CG_CLIF_TEST_PANIC_IN_PREFETCH"),
+                "rustc failed without the hook's panic:\n{stderr}"
+            );
+        } else {
+            eprintln!("[NOTE] no prefetched unit ran before the loop took them all");
+        }
+    }),
     TestCase::custom("aot.small_mem_copies", &|runner| {
         // Constant-size memcpy/memmove/memset become loads and stores at every opt level.
         for opt in ["0", "2"] {
