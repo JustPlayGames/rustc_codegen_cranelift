@@ -764,7 +764,7 @@ impl<'tcx> CPlace<'tcx> {
             let Some((in_vars, _, field_layout)) =
                 crate::analyze::ssa_field(fx, shape, layout, field.index())
             else {
-                bug!("field {field:?} of {self:?} is not in its variables")
+                bug!("field {field:?} of {self:?} is not in its variables (in {})", fx.instance)
             };
             let inner = match (in_vars, self.inner) {
                 (SsaField::Zst, _) => {
