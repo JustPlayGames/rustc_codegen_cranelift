@@ -56,13 +56,16 @@ fn make_module(tcx: TyCtxt<'_>, cgu_name: &str) -> AotModule {
     )
     .unwrap();
 
-    // Disable function sections by default on MSVC as it causes significant slowdowns with link.exe.
-    // Maybe link.exe has exponential behavior when there are many sections with the same name? Also
-    // explicitly disable it on MinGW as rustc already disables it by default on MinGW and as such
-    // isn't tested. If rustc enables it in the future on MinGW, we can re-enable it too once it has
-    // been on MinGW.
-    let default_function_sections =
-        tcx.sess.target.function_sections && !tcx.sess.target.is_like_windows;
+    // Function sections on MSVC too: each function a COMDAT of its own (with its .pdata and
+    // .xdata associated with it), as LLVM emits them, so `/OPT:REF` (rustc passes
+    // `/OPT:REF,NOICF` in debug builds) leaves out the functions nothing calls; without them a
+    // test executable carried every function of every unit it links. A unit with more sections
+    // than COFF's 16-bit section numbers can name is written in the big object format, as LLVM
+    // does. Explicitly disabled on MinGW as rustc already disables it by default on MinGW and as
+    // such isn't tested. If rustc enables it in the future on MinGW, we can re-enable it too once
+    // it has been on MinGW.
+    let default_function_sections = tcx.sess.target.function_sections
+        && (!tcx.sess.target.is_like_windows || tcx.sess.target.is_like_msvc);
     let function_sections =
         tcx.sess.opts.unstable_opts.function_sections.unwrap_or(default_function_sections);
     builder.per_function_section(function_sections);
