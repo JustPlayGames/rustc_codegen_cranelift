@@ -439,6 +439,10 @@ struct PrefetchState {
     in_flight: usize,
     /// Units translated that nobody took yet.
     ready: usize,
+    /// Counts `Prefetch::wake` calls: a waiter waits for it to change.
+    generation: u64,
+    /// Waiters on rustc's worker threads that are marked blocked with its thread pool.
+    blocked: usize,
 }
 
 enum Unit {
@@ -462,7 +466,7 @@ impl Drop for FailUnit<'_> {
         let mut state = self.prefetch.state.lock().unwrap_or_else(|err| err.into_inner());
         state.units.insert(self.cgu_name, Unit::Failed);
         state.in_flight -= 1;
-        self.prefetch.changed.notify_all();
+        self.prefetch.wake(&mut state);
     }
 }
 
@@ -473,17 +477,59 @@ impl Drop for FinishPrefetch<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock().unwrap_or_else(|err| err.into_inner());
         state.finished = true;
-        self.0.changed.notify_all();
+        self.0.wake(&mut state);
     }
 }
 
 impl Prefetch {
+    /// Wakes every waiter to look at the state again. Waiters on rustc's worker threads were
+    /// marked blocked with its thread pool ([`Self::wait`]): they are marked unblocked first, one
+    /// call each, as rustc's query latches do.
+    fn wake(&self, state: &mut PrefetchState) {
+        state.generation = state.generation.wrapping_add(1);
+        if state.blocked > 0 {
+            let registry = rustc_thread_pool::Registry::current();
+            for _ in 0..state.blocked {
+                rustc_thread_pool::mark_unblocked(&registry);
+            }
+            state.blocked = 0;
+        }
+        self.changed.notify_all();
+    }
+
+    /// Waits for the next [`Self::wake`]. On a worker of rustc's thread pool the thread is marked
+    /// blocked meanwhile, as a query latch's waiter is: it gives back its jobserver token, so a
+    /// waiting thread doesn't keep a job from running when tokens are scarce, and rustc's
+    /// deadlock check counts it, so threads that wait on each other end in rustc's deadlock
+    /// error instead of a silent hang.
+    fn wait<'a>(
+        &'a self,
+        mut state: std::sync::MutexGuard<'a, PrefetchState>,
+    ) -> std::sync::MutexGuard<'a, PrefetchState> {
+        let generation = state.generation;
+        if rustc_thread_pool::current_thread_index().is_none() {
+            while state.generation == generation {
+                state = self.changed.wait(state).unwrap();
+            }
+            return state;
+        }
+        state.blocked += 1;
+        rustc_thread_pool::mark_blocked_and_wait(move || {
+            while state.generation == generation {
+                state = self.changed.wait(state).unwrap();
+            }
+            // Unlocked before the thread takes a jobserver token again, which may block.
+            drop(state);
+        });
+        self.state.lock().unwrap()
+    }
+
     /// Queues the units' jobs until every unit is queued or taken, or rustc_codegen_ssa is done.
     pub(crate) fn run(&self, tcx: TyCtxt<'_>, threads: usize) {
         {
             let mut state = self.state.lock().unwrap();
             while !state.started && !state.finished {
-                state = self.changed.wait(state).unwrap();
+                state = self.wait(state);
             }
             if state.finished {
                 return;
@@ -538,7 +584,7 @@ impl Prefetch {
             {
                 let mut state = self.state.lock().unwrap();
                 while (state.in_flight >= threads || state.ready >= ahead) && !state.finished {
-                    state = self.changed.wait(state).unwrap();
+                    state = self.wait(state);
                 }
                 if state.finished {
                     return;
@@ -582,7 +628,7 @@ impl Prefetch {
             .insert(cgu_name, Unit::Ready(rustc_data_structures::sync::IntoDynSyncSend(unit)));
         state.in_flight -= 1;
         state.ready += 1;
-        self.changed.notify_all();
+        self.wake(&mut state);
     }
 
     /// The unit if a job translated it or is translating it; `None` if the caller should.
@@ -590,7 +636,7 @@ impl Prefetch {
         let mut state = self.state.lock().unwrap();
         if !state.started {
             state.started = true;
-            self.changed.notify_all();
+            self.wake(&mut state);
         }
         loop {
             match state.units.get(&cgu_name) {
@@ -602,16 +648,16 @@ impl Prefetch {
                     // Its job hasn't started: don't wait for a thread to pick it up.
                     state.units.insert(cgu_name, Unit::Taken);
                     state.in_flight -= 1;
-                    self.changed.notify_all();
+                    self.wake(&mut state);
                     return None;
                 }
-                Some(Unit::Translating) => state = self.changed.wait(state).unwrap(),
+                Some(Unit::Translating) => state = self.wait(state),
                 Some(Unit::Ready(_)) => {
                     let Some(Unit::Ready(unit)) = state.units.insert(cgu_name, Unit::Taken) else {
                         unreachable!()
                     };
                     state.ready -= 1;
-                    self.changed.notify_all();
+                    self.wake(&mut state);
                     return Some(unit.0);
                 }
                 Some(Unit::Failed) => {
