@@ -138,6 +138,16 @@ pub(crate) fn analyze(fx: &FunctionCx<'_, '_, '_>) -> IndexVec<Local, SsaKind> {
             {
                 flag_map[place.local] = SsaKind::NotSsa;
             }
+            // An aggregate is written field by field (into its variant, for an enum): a field that
+            // does not line up with the variables needs the local in memory, as a place projecting
+            // to it does. An uninhabited variant's fields are such (`Option::<(Never, u8)>::zip`
+            // writing `Some((a, b))`).
+            if let Assign(place_and_rval) = &stmt.kind
+                && let Rvalue::Aggregate(kind, operands) = &place_and_rval.1
+                && !aggregate_in_vars(fx, &place_and_rval.0, kind, operands.len())
+            {
+                flag_map[place_and_rval.0.local] = SsaKind::NotSsa;
+            }
         }
     }
 
@@ -200,25 +210,67 @@ fn keep_projected_locals_in_memory(
 /// the first deref (from there on the place is the memory the pointer points to).
 fn projection_in_vars<'tcx>(
     fx: &FunctionCx<'_, '_, 'tcx>,
+    shape: SsaShape,
+    layout: TyAndLayout<'tcx>,
+    projection: &[PlaceElem<'tcx>],
+) -> bool {
+    project_in_vars(fx, shape, layout, projection).is_some()
+}
+
+/// Where the projections of a place based on a local in variables end: `Some(Some(_))` in its
+/// variables with that shape and layout, `Some(None)` past a deref or at a zero-sized place
+/// (no variables to follow), `None` when they leave its variables.
+fn project_in_vars<'tcx>(
+    fx: &FunctionCx<'_, '_, 'tcx>,
     mut shape: SsaShape,
     mut layout: TyAndLayout<'tcx>,
     projection: &[PlaceElem<'tcx>],
-) -> bool {
+) -> Option<Option<(SsaShape, TyAndLayout<'tcx>)>> {
     for elem in projection {
         match *elem {
-            PlaceElem::Deref => return true,
+            PlaceElem::Deref => return Some(None),
             PlaceElem::Field(field, _) => match ssa_field(fx, shape, layout, field.index()) {
                 // A zero-sized place needs no memory.
-                Some((SsaField::Zst, _, _)) => return true,
+                Some((SsaField::Zst, _, _)) => return Some(None),
                 Some((_, field_shape, field_layout)) => {
                     shape = field_shape;
                     layout = field_layout;
                 }
-                None => return false,
+                None => return None,
             },
             PlaceElem::Downcast(_, variant) => layout = layout.for_variant(fx, variant),
-            _ => return false,
+            _ => return None,
         }
     }
-    true
+    Some(Some((shape, layout)))
+}
+
+/// Whether `codegen` of `place = <kind> { ..fields }` (`base.rs`, `Rvalue::Aggregate`) writes
+/// each field into the variables of `place`'s local, when that local is kept in variables.
+fn aggregate_in_vars<'tcx>(
+    fx: &FunctionCx<'_, '_, 'tcx>,
+    place: &Place<'tcx>,
+    kind: &AggregateKind<'tcx>,
+    fields: usize,
+) -> bool {
+    let local_layout = fx.local_layouts[place.local];
+    let Some(shape) = ssa_shape(fx, local_layout) else { return true };
+    let Some(target) = project_in_vars(fx, shape, local_layout, place.projection) else {
+        return false;
+    };
+    let Some((shape, mut layout)) = target else { return true };
+    let mut active = None;
+    match *kind {
+        // An array is written element by element, a raw pointer as one value.
+        AggregateKind::Array(_) | AggregateKind::RawPtr(..) => return true,
+        AggregateKind::Adt(_, variant, _, _, active_field) => {
+            layout = layout.for_variant(fx, variant);
+            active = active_field;
+        }
+        _ => {}
+    }
+    match active {
+        Some(field) => ssa_field(fx, shape, layout, field.index()).is_some(),
+        None => (0..fields).all(|field| ssa_field(fx, shape, layout, field).is_some()),
+    }
 }

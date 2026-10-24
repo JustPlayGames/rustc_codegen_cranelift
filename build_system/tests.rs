@@ -149,6 +149,19 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
         runner.run_rustc(["example/ssa_adts.rs", "-Copt-level=2", "--crate-name", "ssa_adts2"]);
         runner.run_out_command("ssa_adts2", &[]);
     }),
+    TestCase::custom("aot.uninhabited_variants", &|runner| {
+        // An uninhabited variant's fields written into an enum local at every opt level.
+        for opt in ["0", "2"] {
+            let name = format!("uninhabited_variants{opt}");
+            runner.run_rustc([
+                "example/uninhabited_variants.rs",
+                &format!("-Copt-level={opt}"),
+                "--crate-name",
+                &name,
+            ]);
+            runner.run_out_command(&name, &[]);
+        }
+    }),
     TestCase::custom("aot.small_mem_copies", &|runner| {
         // Constant-size memcpy/memmove/memset become loads and stores at every opt level.
         for opt in ["0", "2"] {
